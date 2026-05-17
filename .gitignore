@@ -1,0 +1,18 @@
+## Build outputs
+bin/
+obj/
+dist/
+
+## IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+## Local backups / archives — not for distribution
+*.rar
+*.7z
+
+## OS
+Thumbs.db
+.DS_Store
