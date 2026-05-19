@@ -5,13 +5,14 @@ using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 namespace FateWalker.Data;
 
 /// <summary>
-/// Per-rank FATE thresholds (count needed to reach NEXT rank). Used by the
-/// local-rank tracker when the agent's <c>NeededFates</c> isn't loaded.
-/// Values are best-effort from community references; the agent value, when
-/// available, always wins over these defaults.
+/// Per-rank FATE thresholds — FATE count required to advance FROM
+/// <c>fromRank</c> TO the next rank. Numbers verified against
+/// ConsoleGamesWiki's Shared FATE page (66 FATEs total per zone to max in
+/// every expansion — just distributed differently). The agent's
+/// <c>NeededFates</c>, when loaded, always wins over these defaults.
 ///
-///  ShB / EW: 3 ranks total — R1→R2 = 20, R2→R3 = 60
-///  DT:       4 ranks total — R1→R2 = 20, R2→R3 = 40, R3→R4 = 60
+///   ShB / EW (max R3, 66 total): R1→R2 = 6,  R2→R3 = 60
+///   DT       (max R4, 66 total): R1→R2 = 6,  R2→R3 = 20,  R3→R4 = 40
 /// </summary>
 public static class FateRankThresholds
 {
@@ -19,13 +20,13 @@ public static class FateRankThresholds
     {
         return (exp, fromRank) switch
         {
-            (Expansion.ShB, 1) => 20,
+            (Expansion.ShB, 1) => 6,
             (Expansion.ShB, 2) => 60,
-            (Expansion.EW,  1) => 20,
+            (Expansion.EW,  1) => 6,
             (Expansion.EW,  2) => 60,
-            (Expansion.DT,  1) => 20,
-            (Expansion.DT,  2) => 40,
-            (Expansion.DT,  3) => 60,
+            (Expansion.DT,  1) => 6,
+            (Expansion.DT,  2) => 20,
+            (Expansion.DT,  3) => 40,
             _ => 0,
         };
     }
