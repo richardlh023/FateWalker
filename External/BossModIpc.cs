@@ -109,4 +109,22 @@ public sealed class BossModIpc
         }
         catch (IpcError e) { _log.Warning(e, "BossMod SetAutoTargetRetarget failed"); }
     }
+
+    /// <summary>
+    /// Generic transient-strategy setter — exposes the underlying IPC for
+    /// modules/tracks not covered by a dedicated helper. Caller supplies the
+    /// full BossMod module type name and track name (case-sensitive).
+    /// </summary>
+    public bool AddTransientStrategy(string presetName, string moduleTypeName, string trackName, string value)
+    {
+        try
+        {
+            return _addTransientStrategy.InvokeFunc(presetName, moduleTypeName, trackName, value);
+        }
+        catch (IpcError e)
+        {
+            _log.Warning(e, $"BossMod AddTransientStrategy({moduleTypeName}/{trackName}={value}) failed");
+            return false;
+        }
+    }
 }

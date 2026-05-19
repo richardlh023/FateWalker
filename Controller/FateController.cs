@@ -179,6 +179,12 @@ public sealed class FateController : IDisposable
     // Random humanize jump during long walks (Traveling). Rolls a fresh
     // 25–75s interval after each fire so cadence isn't a giveaway.
     private DateTime _nextJumpAt = DateTime.MinValue;
+    // Random humanize altitude nudge while flying (Traveling). Smaller
+    // window than jump — pilots fidget more than walkers.
+    private DateTime _nextAltitudeAt = DateTime.MinValue;
+    // Tracks current "lazy dodge" mode in Engaging so we don't spam IPC
+    // every tick when HP stays high.
+    private string _currentMoveDelay = "None"; // matches BossMod track default
 
     // Deferred SelectYesno click — humanize delay before confirming.
     // Stores the time at which the auto-confirm should fire.
@@ -498,6 +504,7 @@ public sealed class FateController : IDisposable
         _sessionLoopRecoveries = 0;
         _loopRecoveryCount = 0;
         _logFingerprints.Clear();
+        _currentMoveDelay = "None"; // matches BossMod track default; re-applied on activation
         _lastStatsLogAt = DateTime.UtcNow;
         _lastNavAvail = _navmesh.IsAvailable;
         _lastBossModAvail = _bossmod.IsAvailable;
@@ -1259,6 +1266,9 @@ public sealed class FateController : IDisposable
         // Skip when flying / mounted (jump press is a no-op or dismount),
         // skip when in combat (already busy), skip during cutscenes / loads.
         TryHumanizeJump();
+        // Random altitude wobble while flying — pilots don't fly perfectly
+        // flat. Adjusts on a tighter 8–25s cadence than the ground jump.
+        TryHumanizeAltitude();
 
         if (IsInFateRange(player.Position))
         {
@@ -1575,6 +1585,11 @@ public sealed class FateController : IDisposable
         // isn't in combat. Manually fire a basic GCD to start the fight; the
         // configured rotation backend then takes over.
         if (!_config.DryRun) ForcePullIfStuck();
+
+        // Lazy-dodge humanize — when HP is comfortable, ask BossMod to react
+        // a tick later to non-critical AOEs. Re-tightens automatically when
+        // HP drops below the comfort threshold.
+        if (!_config.DryRun) ApplyLazyDodgeBias();
     }
 
     /// <summary>
@@ -1613,6 +1628,80 @@ public sealed class FateController : IDisposable
             _log.Warning(ex, "humanize jump failed");
         }
         _nextJumpAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(25, 76));
+    }
+
+    /// <summary>
+    /// Altitude humanize for flying mounts. Briefly taps SPACE (ascend) or Z
+    /// (descend) so the bot's flight path wobbles up/down instead of holding
+    /// a perfectly flat altitude — bots that hold elevation to the inch are
+    /// a textbook detection signal. Only fires while genuinely InFlight; the
+    /// game ignores the keys otherwise so it's a safe no-op on the ground.
+    /// </summary>
+    private void TryHumanizeAltitude()
+    {
+        if (_config.DryRun) return;
+        if (!_condition[ConditionFlag.InFlight]) return;
+        if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51]) return;
+
+        if (DateTime.UtcNow < _nextAltitudeAt)
+        {
+            if (_nextAltitudeAt == DateTime.MinValue)
+                _nextAltitudeAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(8, 26));
+            return;
+        }
+
+        try
+        {
+            // 50/50 ascend (SPACE 0x20) or descend (Z 0x5A) — keys are FFXIV's
+            // default flight binds. If the user remapped, this becomes a no-op
+            // (no harm, no foul).
+            bool up = _rng.Next(2) == 0;
+            _keyState[up ? 0x20 : 0x5A] = true;
+            LogAction(up ? "humanize: altitude up" : "humanize: altitude down");
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "humanize altitude failed");
+        }
+        _nextAltitudeAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(8, 26));
+    }
+
+    /// <summary>
+    /// "Lazy dodge" humanize — when HP is comfortable (≥ 90 %), tell BossMod
+    /// to delay reaction movement by a tick so the bot eats minor AOEs the
+    /// way a confident human would. Drops back to instant dodge when HP
+    /// falls below the comfort threshold. Implemented via the BossMod
+    /// NormalMovement <c>DelayMovement</c> track (None / Short / Long), so
+    /// the bot never STOPS dodging — it just reacts slower when safe.
+    /// </summary>
+    private void ApplyLazyDodgeBias()
+    {
+        if (_config.DryRun) return;
+        if (!_bossmodActivated) return;
+        var player = _objectTable.LocalPlayer;
+        if (player == null || player.MaxHp == 0) return;
+        int hpPct = (int)(100L * player.CurrentHp / player.MaxHp);
+
+        string desired;
+        if (hpPct >= 90)      desired = "Short";   // comfortable — coast a bit
+        else if (hpPct >= 70) desired = "None";    // attentive
+        else                  desired = "None";    // hurt — full attention to dodging
+
+        if (desired == _currentMoveDelay) return;
+        _currentMoveDelay = desired;
+        try
+        {
+            _bossmod.AddTransientStrategy(
+                "FateWalker - FATE",
+                "BossMod.Autorotation.MiscAI.NormalMovement",
+                "DelayMovement",
+                desired);
+            LogAction($"humanize: dodge delay → {desired} (HP {hpPct}%)");
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "lazy-dodge bias failed");
+        }
     }
 
     private void ForcePullIfStuck()
