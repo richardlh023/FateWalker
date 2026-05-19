@@ -187,6 +187,11 @@ public sealed class FateController : IDisposable
     // True once we've already redirected navmesh to a specific FATE actor
     // for the current target, so we don't oscillate landing waypoints.
     private bool _landingRefined;
+    // The actual entity position we're heading to (mob / MotivationNpc),
+    // captured when RefineLandingTarget locks on. Used as the arrival check
+    // in TickTraveling so we dismount RIGHT next to the entity instead of
+    // at the rolled FATE-edge offset.
+    private Vector3? _refinedLandingPos;
     // Tracks current "lazy dodge" mode in Engaging so we don't spam IPC
     // every tick when HP stays high.
     private string _currentMoveDelay = "None"; // matches BossMod track default
@@ -950,6 +955,7 @@ public sealed class FateController : IDisposable
         // Same offset is used the entire travel so we don't shuffle mid-flight.
         _targetFateLandingOffset = RollWaypointOffset();
         _landingRefined = false; // fresh target — let RefineLandingTarget retarget once
+        _refinedLandingPos = null;
 
         // For Preparing FATEs we store the MotivationNpc id but do NOT resolve
         // the NPC's IGameObject yet — Dalamud's ObjectTable only contains entities
@@ -1282,6 +1288,19 @@ public sealed class FateController : IDisposable
         // walks 15y on foot from their dismount spot.
         RefineLandingTarget(player.Position);
 
+        // Arrival check: prefer the refined entity position so we dismount
+        // right on top of the mob/NPC instead of at the FATE-edge offset.
+        // Fall back to the standard radius-based "in range" test when we
+        // never managed to lock onto a specific entity (e.g. fly-in was so
+        // fast the object table hadn't streamed yet).
+        if (_refinedLandingPos.HasValue
+            && Vector3.Distance(player.Position, _refinedLandingPos.Value) < 5f)
+        {
+            LogAction("in range ✓ (next to refined target)");
+            if (!_config.DryRun) _navmesh.Stop();
+            Transition(_targetMotivationNpcId != 0 ? FateBotState.Interacting : FateBotState.Engaging);
+            return;
+        }
         if (IsInFateRange(player.Position))
         {
             LogAction("in range ✓");
@@ -1702,20 +1721,21 @@ public sealed class FateController : IDisposable
     /// for Preparing FATEs, otherwise the nearest hostile FATE-tagged mob)
     /// and retarget vnavmesh to land RIGHT NEXT to it. Removes the giveaway
     /// "dismount at consistent FATE-edge offset, walk 15y on foot" pattern
-    /// — humans land next to the action.
+    /// — humans land next to the action. Triggers from 350 y out (object
+    /// table is loaded by then) and retries while travelling closer if the
+    /// first attempt found nothing.
     /// </summary>
     private void RefineLandingTarget(Vector3 playerPos)
     {
         if (_config.DryRun) return;
         if (_landingRefined) return;
         if (_targetFateId == 0) return;
-        // 2D distance to FATE center; only refine when streaming has loaded
-        // the actor table (~250–400 y window). Refining too early either
-        // finds nothing or picks a wrong target.
+        // 2D distance to FATE center; start trying at 350 y so we lock on
+        // before reaching the 0.7 × radius "in range" check.
         var dist2D = Vector2.Distance(
             new Vector2(playerPos.X, playerPos.Z),
             new Vector2(_targetFatePos.X, _targetFatePos.Z));
-        if (dist2D > 200f) return;
+        if (dist2D > 350f) return;
 
         Vector3? landAt = null;
         string label = "";
@@ -1763,6 +1783,7 @@ public sealed class FateController : IDisposable
         try { _navmesh.PathfindAndMoveCloseTo(landAt.Value, fly: true, range: 3f); }
         catch (Exception ex) { _log.Warning(ex, "refine landing pathfind failed"); }
         _landingRefined = true;
+        _refinedLandingPos = landAt;
         LogAction($"refine landing: heading to {label} at ({landAt.Value.X:F0},{landAt.Value.Y:F0},{landAt.Value.Z:F0})");
     }
 
