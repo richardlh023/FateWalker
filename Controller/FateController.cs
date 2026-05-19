@@ -182,6 +182,11 @@ public sealed class FateController : IDisposable
     // Random humanize altitude nudge while flying (Traveling). Smaller
     // window than jump — pilots fidget more than walkers.
     private DateTime _nextAltitudeAt = DateTime.MinValue;
+    private DateTime _altitudeHoldUntil = DateTime.MinValue;
+    private byte _altitudeHoldKey;
+    // True once we've already redirected navmesh to a specific FATE actor
+    // for the current target, so we don't oscillate landing waypoints.
+    private bool _landingRefined;
     // Tracks current "lazy dodge" mode in Engaging so we don't spam IPC
     // every tick when HP stays high.
     private string _currentMoveDelay = "None"; // matches BossMod track default
@@ -944,6 +949,7 @@ public sealed class FateController : IDisposable
         // Humanize: roll a random landing offset within the configured radius.
         // Same offset is used the entire travel so we don't shuffle mid-flight.
         _targetFateLandingOffset = RollWaypointOffset();
+        _landingRefined = false; // fresh target — let RefineLandingTarget retarget once
 
         // For Preparing FATEs we store the MotivationNpc id but do NOT resolve
         // the NPC's IGameObject yet — Dalamud's ObjectTable only contains entities
@@ -1269,6 +1275,12 @@ public sealed class FateController : IDisposable
         // Random altitude wobble while flying — pilots don't fly perfectly
         // flat. Adjusts on a tighter 8–25s cadence than the ground jump.
         TryHumanizeAltitude();
+        // Once we're within streaming range of the FATE, retarget navmesh to
+        // the actual entity (mob or MotivationNpc) instead of the bot-rolled
+        // landing offset. Lands the player right next to combat rather than
+        // a generic patch of ground at the FATE edge — no human grinder
+        // walks 15y on foot from their dismount spot.
+        RefineLandingTarget(player.Position);
 
         if (IsInFateRange(player.Position))
         {
@@ -1631,17 +1643,31 @@ public sealed class FateController : IDisposable
     }
 
     /// <summary>
-    /// Altitude humanize for flying mounts. Briefly taps SPACE (ascend) or Z
-    /// (descend) so the bot's flight path wobbles up/down instead of holding
-    /// a perfectly flat altitude — bots that hold elevation to the inch are
-    /// a textbook detection signal. Only fires while genuinely InFlight; the
-    /// game ignores the keys otherwise so it's a safe no-op on the ground.
+    /// Altitude humanize for flying mounts. Holds W (forward) together with
+    /// SPACE (ascend) or Z (descend) so the bot keeps moving forward while
+    /// gaining/losing altitude — taping space alone makes the character
+    /// hover in place, which would look more bot-like than the baseline
+    /// flat flight we're trying to fix. The hold runs across a handful of
+    /// frames before clearing.
     /// </summary>
     private void TryHumanizeAltitude()
     {
         if (_config.DryRun) return;
         if (!_condition[ConditionFlag.InFlight]) return;
         if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51]) return;
+
+        // If a hold is in progress, keep re-asserting the keystate each frame
+        // (IKeyState clears the ephemeral down-bit aggressively).
+        if (DateTime.UtcNow < _altitudeHoldUntil)
+        {
+            try
+            {
+                _keyState[0x57] = true; // W
+                _keyState[_altitudeHoldKey] = true;
+            }
+            catch { }
+            return;
+        }
 
         if (DateTime.UtcNow < _nextAltitudeAt)
         {
@@ -1650,20 +1676,83 @@ public sealed class FateController : IDisposable
             return;
         }
 
-        try
+        // Roll a 250–600 ms hold so the wobble is visible but doesn't fight
+        // navmesh's path execution for too long.
+        bool up = _rng.Next(2) == 0;
+        _altitudeHoldKey = up ? (byte)0x20 /* SPACE */ : (byte)0x5A /* Z */;
+        _altitudeHoldUntil = DateTime.UtcNow + TimeSpan.FromMilliseconds(_rng.Next(250, 601));
+        LogAction(up ? "humanize: nudge altitude up (with W)" : "humanize: nudge altitude down (with W)");
+        _nextAltitudeAt = _altitudeHoldUntil + TimeSpan.FromSeconds(_rng.Next(8, 26));
+    }
+
+    /// <summary>
+    /// When the bot is within Dalamud's object-table streaming radius of the
+    /// FATE, locate the actual entity we want to engage (the MotivationNpc
+    /// for Preparing FATEs, otherwise the nearest hostile FATE-tagged mob)
+    /// and retarget vnavmesh to land RIGHT NEXT to it. Removes the giveaway
+    /// "dismount at consistent FATE-edge offset, walk 15y on foot" pattern
+    /// — humans land next to the action.
+    /// </summary>
+    private void RefineLandingTarget(Vector3 playerPos)
+    {
+        if (_config.DryRun) return;
+        if (_landingRefined) return;
+        if (_targetFateId == 0) return;
+        // 2D distance to FATE center; only refine when streaming has loaded
+        // the actor table (~250–400 y window). Refining too early either
+        // finds nothing or picks a wrong target.
+        var dist2D = Vector2.Distance(
+            new Vector2(playerPos.X, playerPos.Z),
+            new Vector2(_targetFatePos.X, _targetFatePos.Z));
+        if (dist2D > 200f) return;
+
+        Vector3? landAt = null;
+        string label = "";
+
+        if (_targetMotivationNpcId != 0)
         {
-            // 50/50 ascend (SPACE 0x20) or descend (Z 0x5A) — keys are FFXIV's
-            // default flight binds. If the user remapped, this becomes a no-op
-            // (no harm, no foul).
-            bool up = _rng.Next(2) == 0;
-            _keyState[up ? 0x20 : 0x5A] = true;
-            LogAction(up ? "humanize: altitude up" : "humanize: altitude down");
+            foreach (var obj in _objectTable)
+            {
+                if (obj.EntityId == _targetMotivationNpcId)
+                {
+                    landAt = obj.Position;
+                    label = $"NPC '{obj.Name.TextValue}'";
+                    break;
+                }
+            }
         }
-        catch (Exception ex)
+        else
         {
-            _log.Warning(ex, "humanize altitude failed");
+            unsafe
+            {
+                IBattleNpc? best = null;
+                float bestDist = float.MaxValue;
+                foreach (var obj in _objectTable)
+                {
+                    if (obj is not IBattleNpc npc) continue;
+                    if (npc.ObjectKind != ObjectKind.BattleNpc) continue;
+                    if (npc.IsDead) continue;
+                    if (npc.BattleNpcKind != BattleNpcSubKind.Combatant) continue;
+                    if ((npc.StatusFlags & StatusFlags.Hostile) == 0) continue;
+                    var go = (CSGameObject*)(void*)npc.Address;
+                    if (go == null) continue;
+                    if (go->FateId != _targetFateId) continue;
+                    var d = Vector3.Distance(npc.Position, playerPos);
+                    if (d < bestDist) { best = npc; bestDist = d; }
+                }
+                if (best != null)
+                {
+                    landAt = best.Position;
+                    label = $"FATE mob '{best.Name.TextValue}'";
+                }
+            }
         }
-        _nextAltitudeAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(8, 26));
+
+        if (landAt == null) return;
+        try { _navmesh.PathfindAndMoveCloseTo(landAt.Value, fly: true, range: 3f); }
+        catch (Exception ex) { _log.Warning(ex, "refine landing pathfind failed"); }
+        _landingRefined = true;
+        LogAction($"refine landing: heading to {label} at ({landAt.Value.X:F0},{landAt.Value.Y:F0},{landAt.Value.Z:F0})");
     }
 
     /// <summary>
