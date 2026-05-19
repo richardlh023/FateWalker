@@ -41,7 +41,8 @@ public sealed class Plugin : IDalamudPlugin
         ITargetManager targetManager,
         IAddonLifecycle addonLifecycle,
         IGameGui gameGui,
-        IDataManager dataManager)
+        IDataManager dataManager,
+        IKeyState keyState)
     {
         _pluginInterface = pluginInterface;
         _commandManager = commandManager;
@@ -60,7 +61,7 @@ public sealed class Plugin : IDalamudPlugin
         var fileLogger = new SessionFileLogger(pluginInterface);
         _controller = new FateController(
             Config, log, framework, clientState, condition,
-            objectTable, fateTable, targetManager, Navmesh, BossMod, Rsr, Lifestream, TextAdvance, addonLifecycle, gameGui, chat, fileLogger, action, selector, dataManager);
+            objectTable, fateTable, targetManager, Navmesh, BossMod, Rsr, Lifestream, TextAdvance, addonLifecycle, gameGui, chat, fileLogger, action, selector, dataManager, keyState);
         _controller.SetSaveConfigCallback(SaveConfig);
 
         _mainWindow = new MainWindow(this, fateTable, clientState, objectTable);

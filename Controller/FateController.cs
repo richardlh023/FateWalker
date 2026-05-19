@@ -44,6 +44,7 @@ public sealed class FateController : IDisposable
     private readonly ActionExecutor _action;
     private readonly FateSelector _selector;
     private readonly IDataManager _dataManager;
+    private readonly IKeyState _keyState;
     private bool _rsrActivated;
     private bool _yesnoListenerRegistered;
 
@@ -175,6 +176,9 @@ public sealed class FateController : IDisposable
     // Force-pull: throttle for the manual basic-attack we fire when target is
     // set but combat hasn't started (defence FATE — mob is on the NPC).
     private DateTime _lastForcePullAt = DateTime.MinValue;
+    // Random humanize jump during long walks (Traveling). Rolls a fresh
+    // 25–75s interval after each fire so cadence isn't a giveaway.
+    private DateTime _nextJumpAt = DateTime.MinValue;
 
     // Deferred SelectYesno click — humanize delay before confirming.
     // Stores the time at which the auto-confirm should fire.
@@ -297,7 +301,8 @@ public sealed class FateController : IDisposable
         SessionFileLogger fileLogger,
         ActionExecutor action,
         FateSelector selector,
-        IDataManager dataManager)
+        IDataManager dataManager,
+        IKeyState keyState)
     {
         _config = config;
         _log = log;
@@ -320,6 +325,7 @@ public sealed class FateController : IDisposable
         _action = action;
         _selector = selector;
         _dataManager = dataManager;
+        _keyState = keyState;
 
         _framework.Update += OnFrameworkUpdate;
     }
@@ -1223,6 +1229,14 @@ public sealed class FateController : IDisposable
         var player = _objectTable.LocalPlayer;
         if (player == null) return;
 
+        // Random humanize jump on long ground walks. Two reasons:
+        //   1) Looks human — fixed-cadence mouse autorun never jumps.
+        //   2) Unsticks the player from small terrain bumps that vnavmesh
+        //      can't path around (low rocks, debris).
+        // Skip when flying / mounted (jump press is a no-op or dismount),
+        // skip when in combat (already busy), skip during cutscenes / loads.
+        TryHumanizeJump();
+
         if (IsInFateRange(player.Position))
         {
             LogAction("in range ✓");
@@ -1410,12 +1424,15 @@ public sealed class FateController : IDisposable
             else
             {
                 _sessionFatesCompleted++;
-                // Local rank tracker: count this FATE toward the territory's
-                // Shared FATE progress so the bot knows rank without needing
-                // the in-game window opened. Synced with agent next time the
-                // user opens the window — agent always wins when fresh.
-                SharedFateProgress.IncrementLocal(_config, _clientState.TerritoryType);
-                _saveConfig?.Invoke();
+                // Local rank tracker only matters when the user is running in
+                // Shared FATE Progress mode (skip-maxed) — otherwise the rank
+                // info isn't consulted for any decision and we'd be writing
+                // dead config on every kill.
+                if (_config.SkipMaxedSharedFateZones)
+                {
+                    SharedFateProgress.IncrementLocal(_config, _clientState.TerritoryType);
+                    _saveConfig?.Invoke();
+                }
             }
             _loopRecoveryCount = 0; // FATE completed = clear progress; reset escalation chain
             var gems = FateWalker.Data.CurrencyReader.GetBicolorGemstoneCount();
@@ -1535,6 +1552,44 @@ public sealed class FateController : IDisposable
         // isn't in combat. Manually fire a basic GCD to start the fight; the
         // configured rotation backend then takes over.
         if (!_config.DryRun) ForcePullIfStuck();
+    }
+
+    /// <summary>
+    /// Random humanize jump — press space briefly via IKeyState. Fires on a
+    /// rolling 25–75s cadence while in Traveling, skipped when mounted/flying
+    /// (jump is a no-op), in combat, or in a cutscene/load. Setting the key
+    /// state to "down" for one frame is enough for the game's input handler
+    /// to register a tap.
+    /// </summary>
+    private void TryHumanizeJump()
+    {
+        if (_config.DryRun) return;
+        if (_condition[ConditionFlag.Mounted]) return;            // jump press = dismount, not jump
+        if (_condition[ConditionFlag.InFlight]) return;
+        if (_condition[ConditionFlag.Diving]) return;
+        if (_condition[ConditionFlag.InCombat]) return;
+        if (_condition[ConditionFlag.OccupiedInCutSceneEvent]) return;
+        if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51]) return;
+
+        if (DateTime.UtcNow < _nextJumpAt)
+        {
+            if (_nextJumpAt == DateTime.MinValue)
+                _nextJumpAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(25, 76));
+            return;
+        }
+
+        try
+        {
+            // VK_SPACE = 0x20. IKeyState handles the ephemeral down-bit
+            // clearing for us across frames.
+            _keyState[0x20] = true;
+            LogAction("humanize: tap jump");
+        }
+        catch (Exception ex)
+        {
+            _log.Warning(ex, "humanize jump failed");
+        }
+        _nextJumpAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(25, 76));
     }
 
     private void ForcePullIfStuck()
