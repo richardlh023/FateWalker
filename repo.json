@@ -3,7 +3,7 @@
     "Author": "RichardLH",
     "Name": "FateWalker",
     "InternalName": "FateWalker",
-    "AssemblyVersion": "1.0.0.3",
+    "AssemblyVersion": "1.0.0.4",
     "Description": "Open-world FATE grinder. Walks between FATEs, mounts, flies, engages, and chains across zones. Uses vnavmesh for pathfinding, BossmodReborn (FateUtils + autorotation) for combat, and Lifestream for cross-zone teleport.\n\nRequired plugins: vnavmesh, BossmodReborn, Lifestream",
     "ApplicableVersion": "any",
     "Tags": ["fate", "automation"],

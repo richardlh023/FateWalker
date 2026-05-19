@@ -980,9 +980,25 @@ public sealed class FateController : IDisposable
     {
         var currentTerritory = _clientState.TerritoryType;
         var workingSet = _config.WorkingSetZones;
-        if (workingSet.Count == 0) return false;
+        if (workingSet.Count == 0)
+        {
+            // Surface this — a silent return makes drought-stalls hard to
+            // diagnose when we end up in a city (e.g. after auto-trading)
+            // with no FATE-zone candidates configured.
+            if (DateTime.UtcNow - _lastDroughtLogAt > TimeSpan.FromSeconds(15))
+            {
+                _lastDroughtLogAt = DateTime.UtcNow;
+                LogAction("rotate: working set is empty — tick zones in the Zones tab to enable rotation");
+            }
+            return false;
+        }
 
         bool outsideWorkingSet = !workingSet.Contains(currentTerritory);
+        // Cities, instances, dungeons etc. aren't FATE zones (not in
+        // TerritoryMap). Treat those as outside-working-set too — we should
+        // never sit on a drought timer in a city.
+        bool inFateTerritory = TerritoryMap.Lookup(currentTerritory) != null;
+        if (!inFateTerritory) outsideWorkingSet = true;
         // Maxed zones are equivalent to "outside working set" for rotation
         // purposes — we want OUT immediately, no drought wait.
         var ranks = _config.SkipMaxedSharedFateZones
@@ -1028,9 +1044,16 @@ public sealed class FateController : IDisposable
         // Build deterministic rotation order (sorted), exclude current and the
         // zone we just departed from to avoid immediate ping-pong. Also drop
         // any zone whose Shared FATE rank is already maxed when the toggle is on.
+        // Exception: when urgentRotate (city/maxed/outside-set), we want OUT
+        // — ignore the _lastDepartedFromTerritory anti-pingpong filter so we
+        // don't get stuck if the only candidate happens to be the one we
+        // just left (e.g. teleported to city to trade, returning to the only
+        // ticked FATE zone).
         bool IsZoneMaxed(uint t) => ranks.TryGetValue(t, out var s) && s.IsMaxed;
         var candidates = workingSet
-            .Where(t => t != currentTerritory && t != _lastDepartedFromTerritory && !IsZoneMaxed(t))
+            .Where(t => t != currentTerritory
+                     && (urgentRotate || t != _lastDepartedFromTerritory)
+                     && !IsZoneMaxed(t))
             .OrderBy(t => t)
             .ToList();
         if (candidates.Count == 0)
