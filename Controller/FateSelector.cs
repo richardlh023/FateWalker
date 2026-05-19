@@ -39,11 +39,11 @@ public sealed class FateSelector
         // treat zones whose Shared FATE rank is already capped as disabled.
         if (zoneAllowed && _config.SkipMaxedSharedFateZones)
         {
-            var ranks = SharedFateProgress.ReadAll();
+            var ranks = SharedFateProgress.ReadAll(_config);
             if (ranks.TryGetValue(currentTerritory, out var state) && state.IsMaxed)
             {
                 zoneAllowed = false;
-                zoneRejectOverride = $"rank maxed ({state.CurrentRank}/{state.MaxRank})";
+                zoneRejectOverride = $"rank maxed ({state.CurrentRank}/{state.ExpectedMaxRank})";
             }
         }
 

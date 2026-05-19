@@ -1,5 +1,8 @@
 # FateWalker
 
+By **RichardLH**.
+
+
 Open-world FATE grinder for FFXIV (Shadowbringers / Endwalker / Dawntrail). Dalamud plugin.
 
 Walks between FATEs, mounts, flies, engages, and chains across zones — including Shared FATE rank tracking, gemstone auto-trading, durability auto-repair, and safety stops.

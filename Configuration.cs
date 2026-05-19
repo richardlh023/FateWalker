@@ -17,10 +17,32 @@ public sealed class Configuration : IPluginConfiguration
     /// When true, skip FATEs in zones where the player has already maxed their
     /// Shared FATE rank (3 for ShB/EW, 4 for DT). Lets the user focus farming
     /// on zones with remaining Shared FATE progress to gain.
-    /// Requires the in-game Shared FATE window to have been opened at least
-    /// once per session for ranks to be readable from <see cref="Data.SharedFateProgress"/>.
+    ///
+    /// Rank values come from <see cref="Data.SharedFateProgress.ReadAll"/>
+    /// which merges live agent data (only fresh while the in-game SharedFate
+    /// window is open) with a locally tracked count snapshotted from the
+    /// agent and incremented on every FATE completion (see
+    /// <see cref="LocalSharedFateProgress"/>).
     /// </summary>
     public bool SkipMaxedSharedFateZones { get; set; } = false;
+
+    /// <summary>
+    /// Locally tracked Shared FATE progress per territory. Snapshotted from
+    /// AgentFateProgress whenever the user opens the in-game SharedFate
+    /// window (its values are live then), then incremented by the bot every
+    /// time a FATE completes in that territory. Lets us know the player's
+    /// rank without re-opening the window after each FATE.
+    /// </summary>
+    public Dictionary<uint, LocalRankSnapshot> LocalSharedFateProgress { get; set; } = new();
+
+    public sealed class LocalRankSnapshot
+    {
+        public byte Rank { get; set; }
+        public ushort Progress { get; set; }
+        public ushort Needed { get; set; }   // 0 means "not yet known from agent"
+        public string LastSyncedIso { get; set; } = "";
+        public int IncrementsSinceSync { get; set; }  // bot-counted +1s; resets on agent sync
+    }
 
     public HashSet<ushort> BlacklistedFateIds { get; set; } = new();
 

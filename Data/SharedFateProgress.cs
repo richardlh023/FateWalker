@@ -1,18 +1,36 @@
+using System;
 using System.Collections.Generic;
-using System.Text;
 using FFXIVClientStructs.FFXIV.Client.UI.Agent;
 
 namespace FateWalker.Data;
 
 /// <summary>
-/// Reads per-zone Shared FATE rank/progress from <c>AgentFateProgress</c>.
-/// 3 tabs × 6 zones = ShB/EW/DT × per-zone slot. Each zone has CurrentRank,
-/// MaxRank (3 for ShB/EW, 4 for DT), FateProgress count and NeededFates total.
+/// Per-rank FATE thresholds (count needed to reach NEXT rank). Used by the
+/// local-rank tracker when the agent's <c>NeededFates</c> isn't loaded.
+/// Values are best-effort from community references; the agent value, when
+/// available, always wins over these defaults.
 ///
-/// Data is populated once the player opens the Shared FATE UI at least once
-/// per session. Before that, ranks may read as 0; we expose <see cref="IsLoaded"/>
-/// so the UI can hint the user to open the in-game window if values look wrong.
+///  ShB / EW: 3 ranks total — R1→R2 = 20, R2→R3 = 60
+///  DT:       4 ranks total — R1→R2 = 20, R2→R3 = 40, R3→R4 = 60
 /// </summary>
+public static class FateRankThresholds
+{
+    public static ushort DefaultNeeded(Expansion exp, byte fromRank)
+    {
+        return (exp, fromRank) switch
+        {
+            (Expansion.ShB, 1) => 20,
+            (Expansion.ShB, 2) => 60,
+            (Expansion.EW,  1) => 20,
+            (Expansion.EW,  2) => 60,
+            (Expansion.DT,  1) => 20,
+            (Expansion.DT,  2) => 40,
+            (Expansion.DT,  3) => 60,
+            _ => 0,
+        };
+    }
+}
+
 public sealed record SharedFateZoneState(
     uint TerritoryId,
     byte CurrentRank,
@@ -20,20 +38,19 @@ public sealed record SharedFateZoneState(
     ushort Progress,
     ushort Needed,
     string RankText,
-    string ProgressText)
+    string ProgressText,
+    bool IsLocallyTracked = false)
 {
     /// <summary>
-    /// Loaded = the agent has populated meaningful data for this zone.
-    /// We can't trust the MaxRank byte (clientstructs offset is wrong against
-    /// the live game — comes back as 0 even when rank is 2), so we infer
-    /// "loaded" from any of the other three fields being nonzero.
+    /// True when we have enough info to display rank — either the agent
+    /// returned non-zero values, or our local snapshot is non-empty.
     /// </summary>
     public bool HasValidRank => CurrentRank > 0 || Progress > 0 || Needed > 0;
 
     /// <summary>
-    /// Maxed when the player has hit the rank cap for this expansion. Cap is
-    /// 3 for ShB/EW and 4 for DT — derived from the territory's expansion via
-    /// <see cref="TerritoryMap"/> rather than the unreliable MaxRank byte.
+    /// Maxed = player hit the rank cap for this expansion.
+    /// Cap = 3 for ShB/EW, 4 for DT (derived from TerritoryMap; the agent's
+    /// MaxRank byte reads as 0 in current clientstructs, so we can't trust it).
     /// </summary>
     public bool IsMaxed
     {
@@ -46,10 +63,9 @@ public sealed record SharedFateZoneState(
     }
 
     public byte ExpectedMaxRank => ExpansionRankCap(TerritoryId);
-
     public float ProgressFraction => Needed == 0 ? 0f : (float)Progress / Needed;
 
-    private static byte ExpansionRankCap(uint territoryId)
+    public static byte ExpansionRankCap(uint territoryId)
     {
         var info = TerritoryMap.Lookup(territoryId);
         if (info == null) return 0;
@@ -65,16 +81,14 @@ public sealed record SharedFateZoneState(
 
 public static class SharedFateProgress
 {
-    /// <summary>True if any zone reports a valid MaxRank (UI has been opened).</summary>
+    /// <summary>True if any zone has either agent-loaded OR locally-tracked rank data.</summary>
     public static bool IsLoaded { get; private set; }
 
     /// <summary>
-    /// Diagnostic dump of every slot in the agent — produces one line per
-    /// (tab, zone) showing raw bytes. Used by the "Refresh / Dump" button so
-    /// the user can paste output back when reads look wrong (struct layout
-    /// drift between game patch and FFXIVClientStructs).
+    /// Diagnostic dump of every agent slot — raw bytes plus our local snapshot
+    /// merged in for comparison. Used by the "Refresh / Dump" UI button.
     /// </summary>
-    public static unsafe List<string> DumpRaw()
+    public static unsafe List<string> DumpRaw(Configuration? cfg = null)
     {
         var lines = new List<string>();
         var agent = AgentFateProgress.Instance();
@@ -87,54 +101,154 @@ public static class SharedFateProgress
             for (int z = 0; z < 6; z++)
             {
                 ref var zone = ref tab.Zones[z];
-                string rankText = "<null>";
-                string progressText = "<null>";
+                uint tt = zone.TerritoryTypeId;
+                byte disp = zone.DisplayOrder;
+                byte curR = zone.CurrentRank, maxR = zone.MaxRank;
+                ushort prog = zone.FateProgress, needed = zone.NeededFates;
+                string rankText = "<null>", progressText = "<null>", zoneName = "<null>";
                 try { rankText = zone.RankText.ToString(); } catch { }
                 try { progressText = zone.ProgressText.ToString(); } catch { }
-                string zoneName = "<null>";
                 try { zoneName = zone.ZoneName.ToString(); } catch { }
-                lines.Add($"  [{z}] tt={zone.TerritoryTypeId} disp={zone.DisplayOrder} rank={zone.CurrentRank}/{zone.MaxRank} prog={zone.FateProgress}/{zone.NeededFates} name='{zoneName}' rankText='{rankText}' progressText='{progressText}'");
+                var local = cfg != null && cfg.LocalSharedFateProgress.TryGetValue(tt, out var l)
+                    ? $" local={l.Rank}/?  prog={l.Progress}/{l.Needed} (+{l.IncrementsSinceSync} since {l.LastSyncedIso})"
+                    : "";
+                lines.Add($"  [{z}] tt={tt} disp={disp} rank={curR}/{maxR} prog={prog}/{needed} name='{zoneName}' rankText='{rankText}' progressText='{progressText}'{local}");
             }
         }
         return lines;
     }
 
     /// <summary>
-    /// Read all 18 known FATE zones' progress. Returns dictionary keyed by
-    /// TerritoryTypeId. Zones not in the agent are omitted; zones whose MaxRank
-    /// is outside the valid {3, 4} range are still returned but their
-    /// <see cref="SharedFateZoneState.HasValidRank"/> reads false — callers
-    /// should gate any rank display on that flag.
+    /// Read all FATE zones' progress, merging agent data with the local
+    /// snapshot. If the agent has loaded values for a zone (window is/was
+    /// open), those are authoritative AND we snapshot them into the local
+    /// store. Otherwise we fall back to the local snapshot — which the bot
+    /// keeps current by calling <see cref="IncrementLocal"/> on every FATE
+    /// completion.
     /// </summary>
-    public static unsafe Dictionary<uint, SharedFateZoneState> ReadAll()
+    public static unsafe Dictionary<uint, SharedFateZoneState> ReadAll(Configuration cfg)
     {
         var result = new Dictionary<uint, SharedFateZoneState>();
         var agent = AgentFateProgress.Instance();
-        if (agent == null) return result;
-
         bool anyLoaded = false;
-        for (int t = 0; t < 3; t++)
+
+        // Pass 1 — read agent. If a zone has data, sync local snapshot and
+        // emit a SharedFateZoneState backed by agent values.
+        if (agent != null)
         {
-            ref var tab = ref agent->Tabs[t];
-            for (int z = 0; z < 6; z++)
+            for (int t = 0; t < 3; t++)
             {
-                ref var zone = ref tab.Zones[z];
-                if (zone.TerritoryTypeId == 0) continue;
-                var rankText = zone.RankText.ToString();
-                var progressText = zone.ProgressText.ToString();
-                var state = new SharedFateZoneState(
-                    zone.TerritoryTypeId,
-                    zone.CurrentRank,
-                    zone.MaxRank,
-                    zone.FateProgress,
-                    zone.NeededFates,
-                    rankText,
-                    progressText);
-                if (state.HasValidRank) anyLoaded = true;
-                result[zone.TerritoryTypeId] = state;
+                ref var tab = ref agent->Tabs[t];
+                for (int z = 0; z < 6; z++)
+                {
+                    ref var zone = ref tab.Zones[z];
+                    if (zone.TerritoryTypeId == 0) continue;
+                    string rankText = "", progressText = "";
+                    try { rankText = zone.RankText.ToString(); } catch { }
+                    try { progressText = zone.ProgressText.ToString(); } catch { }
+                    var state = new SharedFateZoneState(
+                        zone.TerritoryTypeId,
+                        zone.CurrentRank,
+                        zone.MaxRank,
+                        zone.FateProgress,
+                        zone.NeededFates,
+                        rankText,
+                        progressText);
+                    if (state.HasValidRank)
+                    {
+                        anyLoaded = true;
+                        // Sync local snapshot — agent always wins when fresh.
+                        cfg.LocalSharedFateProgress[zone.TerritoryTypeId] = new Configuration.LocalRankSnapshot
+                        {
+                            Rank = state.CurrentRank,
+                            Progress = state.Progress,
+                            Needed = state.Needed,
+                            LastSyncedIso = DateTime.UtcNow.ToString("o"),
+                            IncrementsSinceSync = 0,
+                        };
+                    }
+                    result[zone.TerritoryTypeId] = state;
+                }
             }
         }
+
+        // Pass 2 — for any tracked territory not already emitted by the agent
+        // (or emitted with no useful data), substitute the local snapshot.
+        foreach (var kv in cfg.LocalSharedFateProgress)
+        {
+            var tt = kv.Key;
+            var local = kv.Value;
+            // Compute effective progress = snapshot.Progress + post-snapshot
+            // increments. If we cross the threshold, bump rank and roll over.
+            var (effRank, effProg, effNeeded) = ApplyIncrements(tt, local);
+            var fresh = new SharedFateZoneState(
+                TerritoryId: tt,
+                CurrentRank: effRank,
+                MaxRank: 0,
+                Progress: effProg,
+                Needed: effNeeded,
+                RankText: "",
+                ProgressText: "",
+                IsLocallyTracked: true);
+            // Only overwrite if agent didn't already give us a HasValidRank result.
+            if (result.TryGetValue(tt, out var existing) && existing.HasValidRank) continue;
+            if (fresh.HasValidRank) anyLoaded = true;
+            result[tt] = fresh;
+        }
+
         IsLoaded = anyLoaded;
         return result;
     }
+
+    /// <summary>
+    /// Apply the +1 counter to a snapshot, rolling over ranks if the local
+    /// count crosses Needed. Returns the effective (rank, progress, needed)
+    /// the user/bot should see now.
+    /// </summary>
+    private static (byte rank, ushort prog, ushort needed) ApplyIncrements(uint territoryId, Configuration.LocalRankSnapshot local)
+    {
+        byte rank = local.Rank;
+        int prog = local.Progress + local.IncrementsSinceSync;
+        ushort needed = local.Needed;
+        var info = TerritoryMap.Lookup(territoryId);
+        if (info == null) return (rank, (ushort)Math.Min(prog, ushort.MaxValue), needed);
+        var cap = SharedFateZoneState.ExpansionRankCap(territoryId);
+
+        // Resolve Needed if zero (e.g. user opened window mid-rank-fill).
+        if (needed == 0) needed = FateRankThresholds.DefaultNeeded(info.Expansion, rank > 0 ? rank : (byte)1);
+
+        // Roll over ranks until progress fits OR we hit cap.
+        while (needed > 0 && prog >= needed && rank < cap)
+        {
+            prog -= needed;
+            rank++;
+            needed = FateRankThresholds.DefaultNeeded(info.Expansion, rank);
+            if (rank >= cap) { prog = 0; needed = 0; break; }
+        }
+        return (rank, (ushort)Math.Clamp(prog, 0, ushort.MaxValue), needed);
+    }
+
+    /// <summary>
+    /// Called by the FateController when a FATE completes in <paramref name="territoryId"/>.
+    /// Increments the local snapshot's pending counter; the rank-rollover math
+    /// runs lazily in <see cref="ReadAll"/>.
+    /// </summary>
+    public static void IncrementLocal(Configuration cfg, uint territoryId)
+    {
+        if (!cfg.LocalSharedFateProgress.TryGetValue(territoryId, out var local))
+        {
+            // No baseline yet — seed an empty snapshot. Rank will read as 0
+            // until the user opens the SharedFate window at least once.
+            local = new Configuration.LocalRankSnapshot
+            {
+                Rank = 0, Progress = 0, Needed = 0,
+                LastSyncedIso = "",
+                IncrementsSinceSync = 0,
+            };
+            cfg.LocalSharedFateProgress[territoryId] = local;
+        }
+        local.IncrementsSinceSync++;
+    }
+
+    private static string Safe(Func<string> f) { try { return f(); } catch { return ""; } }
 }

@@ -843,7 +843,7 @@ public sealed class FateController : IDisposable
         bool currentZoneMaxed = false;
         if (_config.SkipMaxedSharedFateZones)
         {
-            var ranks = SharedFateProgress.ReadAll();
+            var ranks = SharedFateProgress.ReadAll(_config);
             if (ranks.TryGetValue(_clientState.TerritoryType, out var st) && st.IsMaxed)
                 currentZoneMaxed = true;
         }
@@ -980,7 +980,7 @@ public sealed class FateController : IDisposable
         // Maxed zones are equivalent to "outside working set" for rotation
         // purposes — we want OUT immediately, no drought wait.
         var ranks = _config.SkipMaxedSharedFateZones
-            ? SharedFateProgress.ReadAll()
+            ? SharedFateProgress.ReadAll(_config)
             : new Dictionary<uint, SharedFateZoneState>();
         bool currentZoneMaxed = ranks.TryGetValue(currentTerritory, out var curState) && curState.IsMaxed;
         bool urgentRotate = outsideWorkingSet || currentZoneMaxed;
@@ -1407,7 +1407,16 @@ public sealed class FateController : IDisposable
             || fate.State == FateState.Ending)
         {
             if (fate.State == FateState.Failed) _sessionFatesFailed++;
-            else                                _sessionFatesCompleted++;
+            else
+            {
+                _sessionFatesCompleted++;
+                // Local rank tracker: count this FATE toward the territory's
+                // Shared FATE progress so the bot knows rank without needing
+                // the in-game window opened. Synced with agent next time the
+                // user opens the window — agent always wins when fresh.
+                SharedFateProgress.IncrementLocal(_config, _clientState.TerritoryType);
+                _saveConfig?.Invoke();
+            }
             _loopRecoveryCount = 0; // FATE completed = clear progress; reset escalation chain
             var gems = FateWalker.Data.CurrencyReader.GetBicolorGemstoneCount();
             LogAction($"FATE done: \"{_targetFateName}\" (Lv{fate.Level}, state={fate.State}, bonus={fate.HasBonus}) · session FATEs={_sessionFatesCompleted}, failed={_sessionFatesFailed}, gems={gems}");

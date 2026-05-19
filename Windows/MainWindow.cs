@@ -332,7 +332,7 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.SameLine();
         ImGui.TextDisabled("— focus farming on zones with rank progress remaining");
 
-        var ranks = SharedFateProgress.ReadAll();
+        var ranks = SharedFateProgress.ReadAll(_plugin.Config);
         if (!SharedFateProgress.IsLoaded)
         {
             ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f),
@@ -341,7 +341,7 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.SameLine();
         if (ImGui.SmallButton("Refresh / Dump"))
         {
-            _sharedFateDump = SharedFateProgress.DumpRaw();
+            _sharedFateDump = SharedFateProgress.DumpRaw(_plugin.Config);
         }
         if (_sharedFateDump != null)
         {

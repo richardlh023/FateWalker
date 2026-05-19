@@ -5,9 +5,10 @@
         <Nullable>enable</Nullable>
         <LangVersion>latest</LangVersion>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-        <Version>1.0.0.1</Version>
-        <AssemblyVersion>1.0.0.1</AssemblyVersion>
-        <FileVersion>1.0.0.1</FileVersion>
+        <Authors>RichardLH</Authors>
+        <Version>1.0.0.2</Version>
+        <AssemblyVersion>1.0.0.2</AssemblyVersion>
+        <FileVersion>1.0.0.2</FileVersion>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
