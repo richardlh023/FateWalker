@@ -126,6 +126,10 @@ public sealed class FateController : IDisposable
     // the bot was Stopped — survey is one-shot data collection, so on
     // completion we return to Stopped instead of starting the farming loop.
     private bool _surveyOnlySession;
+    // City-hub vendors live far from the main aetheryte plaza (Beryl at Nexus
+    // Arcade, Kajeel Ja at Bayside Bevy, etc.). After the main teleport we
+    // aethernet-hop to a near-vendor shard. This flag tracks "hop already done".
+    private bool _tradingAethernetFired;
     // True when survey mode acquired TextAdvance itself (because Start() wasn't
     // called). We release on FinishTrading so we don't leak external control.
     private bool _surveyAcquiredTextAdvance;
@@ -529,6 +533,7 @@ public sealed class FateController : IDisposable
         _tradingVendor = null;
         _tradingItemId = 0;
         _tradingTeleportFired = false;
+        _tradingAethernetFired = false;
         _tradingSurveyMode = false;
         _surveyOnlySession = false;
         if (_surveyAcquiredTextAdvance)
@@ -2206,6 +2211,7 @@ public sealed class FateController : IDisposable
         _tradingVendor = null;
         _tradingItemId = 0;
         _tradingTeleportFired = false;
+        _tradingAethernetFired = false;
         _tradingSurveyMode = false;
         // Survey-triggered runs return to Stopped — they were never part of a
         // farming session. Auto-trade-triggered runs return to Selecting to
@@ -2272,6 +2278,7 @@ public sealed class FateController : IDisposable
         _tradingItemId = 0;
         _tradingSurveyMode = true;
         _tradingTeleportFired = false;
+        _tradingAethernetFired = false;
         _lastTradingActionAt = DateTime.MinValue;
         _surveyOnlySession = (State == FateBotState.Stopped);
         // Same-zone optimisation: skip the aetheryte hop only if the vendor is
@@ -2352,6 +2359,23 @@ public sealed class FateController : IDisposable
         if (_condition[ConditionFlag.Mounted])
         {
             if (TryDismountOrRescue("trading-pre-shop")) return;
+        }
+
+        // Step 2.5 — aethernet sub-shard hop for city-hub vendors. After the
+        // main aetheryte teleport we're at the central plaza; the vendor may
+        // live 500+y away at a specific shard (Beryl @ Nexus Arcade, Kajeel
+        // Ja @ Bayside Bevy Marketplace, etc.). Aethernet hop is cheap and
+        // lands us right next to the vendor's object-table radius.
+        if (!_tradingAethernetFired && _tradingVendor.AethernetShardId != 0
+            && _clientState.TerritoryType == _tradingVendor.TerritoryType
+            && !_config.DryRun)
+        {
+            if (DateTime.UtcNow - _lastTradingActionAt < TimeSpan.FromSeconds(2)) return;
+            _lastTradingActionAt = DateTime.UtcNow;
+            var ok = _lifestream.AethernetHop(_tradingVendor.AethernetShardId);
+            LogAction($"trading: AethernetHop(shard={_tradingVendor.AethernetShardId}) → {ok}");
+            if (ok) _tradingAethernetFired = true;
+            return;
         }
 
         // Step 3 — find vendor NPC nearby + interact.

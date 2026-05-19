@@ -24,7 +24,9 @@ public sealed record VendorNpc(
     uint AetheryteId,            // Lumina Aetheryte row to teleport to
     uint TerritoryType,          // expected territory after teleport
     Expansion Expansion,
-    IReadOnlyList<VendorItem> Items);
+    IReadOnlyList<VendorItem> Items,
+    uint AethernetShardId = 0);  // optional in-zone aethernet shard to hop to
+                                 // after the main teleport (city hubs only)
 
 public static class VendorCatalog
 {
@@ -45,11 +47,11 @@ public static class VendorCatalog
             new("Heavens' Eye Materia VII",     26727, 60),
             new("Savage Aim Materia VII",       26728, 60),
             new("Knowledge Never Sleeps Roll",  28878, 350, IsMbTradable: true, Notes: "high MB demand"),
-        }),
+        }, AethernetShardId: 149),  // Crystarium Markets
         new("Pedronille", "Eulmore", 134, 820, Expansion.ShB, new VendorItem[]
         {
             new("Sharlayan Diadema (minion)", 35860, 800, Notes: "one-time, rank-max"),
-        }),
+        }, AethernetShardId: 157),  // Eulmore Mainstay
         // Per-zone ShB vendors — accessible at lower rank than Gramsol/Pedronille
         // (which require Rank 3 in ALL ShB zones). TerritoryType is the FATE zone
         // they live in, not a city. Items left empty — fill via Survey button.
@@ -67,12 +69,12 @@ public static class VendorCatalog
             new("Heavens' Eye Materia VIII",  26728, 60),
             new("Savage Aim Materia VIII",    26729, 60),
             new("Perfumed Eves Roll",         36809, 350, IsMbTradable: true),
-        }),
+        }, AethernetShardId: 191),  // Radz-at-Han Meghaduta (West Balshahn Bazaar area)
         new("Gadfrid", "Old Sharlayan", 182, 962, Expansion.EW, new VendorItem[]
         {
             new("Bicolor Gemstone Voucher", 35833, 100, IsMbTradable: true),
             new("Materia VIII",             26728, 60),
-        }),
+        }, AethernetShardId: 184),  // Old Sharlayan Studium
         // Per-zone EW vendors.
         new("Faezbroes",  "Labyrinthos",     166, 956, Expansion.EW, System.Array.Empty<VendorItem>()),
         new("Mahveydah",  "Thavnair",        169, 957, Expansion.EW, System.Array.Empty<VendorItem>()),
@@ -90,12 +92,12 @@ public static class VendorCatalog
             new("Heavens' Eye Materia X",          33930, 60),
             new("Savage Aim Materia X",            33932, 60),
             new("Morrow's Might Orchestrion Roll", 46870, 450, IsMbTradable: true, Notes: "DT marquee roll"),
-        }),
+        }, AethernetShardId: 235),  // Solution Nine Nexus Arcade
         new("Kajeel Ja", "Tuliyollal", 216, 1185, Expansion.DT, new VendorItem[]
         {
             new("Turali Bicolor Gemstone Voucher", 43961, 100, IsMbTradable: true),
             new("Materia IX",                       41757, 60),
-        }),
+        }, AethernetShardId: 221),  // Tuliyollal Bayside Bevy Marketplace
         // Per-zone DT vendors. Ok'hanu / Gate of Remembrance aetherytes don't
         // exist in the Lifestream-friendly enum yet — fall back to the closest
         // zone aetheryte (Many Fires / Leynode Mnemo) and let the bot walk.
