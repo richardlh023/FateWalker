@@ -1543,6 +1543,16 @@ public sealed class FateController : IDisposable
                 LogAction($"BossMod.Activate (backend={_config.CombatBackend})");
                 _bossmod.Activate(preset);
 
+                // Defensive reset: a previous build's lazy-dodge bias could
+                // have left NormalMovement.DelayMovement at "Short", which
+                // makes BossMod sluggish about ALL reactive movement (not
+                // just AOE dodge). Force it back to "None" on every activate.
+                _bossmod.AddTransientStrategy(
+                    "FateWalker - FATE",
+                    "BossMod.Autorotation.MiscAI.NormalMovement",
+                    "DelayMovement",
+                    "None");
+
                 // Override StayCloseToTarget range based on the player's job so
                 // melee jobs walk into hitbox range instead of stalling.
                 var player = _objectTable.LocalPlayer;
@@ -1598,10 +1608,11 @@ public sealed class FateController : IDisposable
         // configured rotation backend then takes over.
         if (!_config.DryRun) ForcePullIfStuck();
 
-        // Lazy-dodge humanize — when HP is comfortable, ask BossMod to react
-        // a tick later to non-critical AOEs. Re-tightens automatically when
-        // HP drops below the comfort threshold.
-        if (!_config.DryRun) ApplyLazyDodgeBias();
+        // Lazy-dodge bias removed — DelayMovement in BossMod's NormalMovement
+        // delays ALL reactive movement, not just AOE dodge. The side effect
+        // was the bot ignoring nearby FATE mobs and standing in place after
+        // each kill. Keep the function around for future per-action tuning
+        // but don't apply by default. See ApplyLazyDodgeBias() doc.
     }
 
     /// <summary>
