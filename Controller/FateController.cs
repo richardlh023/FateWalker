@@ -3421,20 +3421,42 @@ public sealed class FateController : IDisposable
         _lastDismountAttemptAt = DateTime.UtcNow;
         _dismountFailCount++;
 
-        // 5 failed attempts (~3.5s of trying) = unsafe terrain. Re-pathfind to
-        // FATE center at ground Y. vnavmesh fly-pathfind with a small range
-        // typically descends to a flat landing area. Don't rescue more often
-        // than every 8s to give the new path a chance.
+        // Mid-air-stuck rescue: when vnavmesh's fly-path settled hovering over
+        // an NPC / building / tall mob, the spot directly below the player
+        // isn't navmeshable ground — Dismount triggers a descent that gets
+        // cancelled and the bot floats forever. After 3 failures (~2 s), kick
+        // a ground-walk re-pathfind (fly=false). vnav will find the nearest
+        // walkable surface and the actual landing happens cleanly there.
+        if (_dismountFailCount >= 3
+            && _condition[ConditionFlag.InFlight]
+            && DateTime.UtcNow - _lastDismountRescueAt > TimeSpan.FromSeconds(5))
+        {
+            _lastDismountRescueAt = DateTime.UtcNow;
+            var player = _objectTable.LocalPlayer;
+            if (player != null)
+            {
+                // Prefer the refined entity position (mob/NPC we're going to)
+                // if available, otherwise the FATE center.
+                var dest = _refinedLandingPos ?? _targetFatePos;
+                LogAction($"dismount stuck mid-air ({_dismountFailCount} tries) — ground-pathfind to ({dest.X:F0},{dest.Y:F0},{dest.Z:F0}) (fly=false)");
+                try { _navmesh.Stop(); } catch {}
+                try { _navmesh.PathfindAndMoveCloseTo(dest, fly: false, range: 3f); } catch {}
+                _dismountFailCount = 0;
+                return true;
+            }
+        }
+
+        // Fallback rescue: 5+ tries on the ground (rare — terrain ledge etc.).
+        // Re-fly to FATE center, range 5y for a more central landing.
         if (_dismountFailCount >= 5
             && _targetFateRadius > 0
             && DateTime.UtcNow - _lastDismountRescueAt > TimeSpan.FromSeconds(8))
         {
             _lastDismountRescueAt = DateTime.UtcNow;
-            // Land at FATE center, range 5 — tighter than usual so we descend.
             var dest = _targetFatePos;
             LogAction($"dismount stuck after {_dismountFailCount} tries — re-pathfind to FATE center for safer landing");
             _navmesh.PathfindAndMoveCloseTo(dest, fly: true, range: 5f);
-            _dismountFailCount = 0; // reset, give the new path time to land
+            _dismountFailCount = 0;
         }
         return true;
     }
