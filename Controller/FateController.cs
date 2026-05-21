@@ -676,13 +676,17 @@ public sealed class FateController : IDisposable
         // Trigger auto-repair when min durability drops below threshold. We do
         // it from the orchestration layer (here, not inside a Tick* method)
         // because it should preempt almost any state — except those we should
-        // never interrupt: Dying/Paused/Repairing/Stopped/Teleporting/Interacting.
+        // never interrupt: any "going to a safe place" or "already at one"
+        // state. PreparingPause is the one we missed and it caused a loop
+        // with session-cap: cap fires from Repairing → PreparingPause → cap
+        // can't fire (excluded) but auto-repair could → Repairing → cap → …
         if (_config.EnableAutoRepair
             && _lastDurabilityMin > 0
             && _lastDurabilityMin < _config.RepairAtDurabilityPercent
             && State != FateBotState.Repairing
             && State != FateBotState.Dying
             && State != FateBotState.Paused
+            && State != FateBotState.PreparingPause
             && State != FateBotState.Teleporting
             && State != FateBotState.Interacting
             && State != FateBotState.Trading)
@@ -717,6 +721,7 @@ public sealed class FateController : IDisposable
             && State != FateBotState.Repairing
             && State != FateBotState.Dying
             && State != FateBotState.Paused
+            && State != FateBotState.PreparingPause
             && State != FateBotState.Teleporting
             && State != FateBotState.Interacting)
         {
@@ -767,9 +772,17 @@ public sealed class FateController : IDisposable
         // flow MUST run to completion. Otherwise pause↔dying ping-pongs every
         // tick (death override pulls us back to Dying, session cap re-pauses)
         // and the corpse never gets to click the Return dialog.
+        // Session cap also skips Repairing / Trading — those flows must complete
+        // before we pause, otherwise the bot bounces between "go repair" and
+        // "go pause" forever (auto-repair re-fires from PreparingPause, cap
+        // re-fires from Repairing, loop). Let the in-flight transactional
+        // state finish; the cap check fires again on the next non-excluded
+        // tick.
         if (State != FateBotState.Paused
             && State != FateBotState.PreparingPause
             && State != FateBotState.Dying
+            && State != FateBotState.Repairing
+            && State != FateBotState.Trading
             && _sessionStartedAt != null && _config.SessionCapHours > 0
             && DateTime.UtcNow - _sessionStartedAt.Value > TimeSpan.FromHours(_config.SessionCapHours))
         {
