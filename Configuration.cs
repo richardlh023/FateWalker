@@ -128,6 +128,18 @@ public sealed class Configuration : IPluginConfiguration
     public int MinDroughtSeconds { get; set; } = 180;
 
     /// <summary>
+    /// In-zone long-range teleport threshold (yalms). When the picked FATE is
+    /// farther than this, the bot teleports to the zone's primary aetheryte
+    /// first and flies the rest, instead of flying the full distance.
+    ///
+    /// Math: flying ≈ 20 y/s. Teleport overhead (cast + loading) ≈ 12 s, so
+    /// teleport saves time once it cuts > 240 y of flying. 1500 y is a safe
+    /// default — by then teleport is faster by a comfortable margin even if
+    /// the aetheryte sits halfway between player and FATE.
+    /// </summary>
+    public int LongRangeTeleportYalms { get; set; } = 1500;
+
+    /// <summary>
     /// How long to wait after death for a raise before giving up and clicking
     /// "Return to home aetheryte". 30s is the convention.
     /// </summary>

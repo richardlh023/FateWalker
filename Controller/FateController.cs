@@ -988,8 +988,36 @@ public sealed class FateController : IDisposable
         if (IsInFateRange(player.Position))
         {
             Transition(_targetMotivationNpcId != 0 ? FateBotState.Interacting : FateBotState.Engaging);
+            return;
         }
-        else if (_condition[ConditionFlag.Mounted])
+
+        // Long-range in-zone teleport: when the FATE is far enough that a
+        // teleport + short fly beats a direct fly (default threshold 1500 y),
+        // hop to the zone's primary aetheryte first. After arrival we re-enter
+        // Selecting and the FATE is picked again at much shorter range.
+        var zone = TerritoryMap.Lookup(_clientState.TerritoryType);
+        if (zone != null
+            && _lifestream.IsAvailable
+            && chosen.DistanceToPlayer > _config.LongRangeTeleportYalms
+            && !_condition[ConditionFlag.InCombat])
+        {
+            LogAction($"long-range hop: FATE {chosen.DistanceToPlayer:F0}y > {_config.LongRangeTeleportYalms}y — teleport to {zone.AetheryteName} (aetheryte {zone.AetheryteId}) first");
+            _pendingTeleportTerritory = _clientState.TerritoryType;
+            _pendingTeleportAetheryte = zone.AetheryteId;
+            _teleportFired = false;
+            if (!_config.DryRun)
+            {
+                _navmesh.Stop();
+                if (_rsrActivated)     { _rsr.Deactivate();     _rsrActivated = false; }
+                if (_bossmodActivated) { _bossmod.Deactivate(); _bossmodActivated = false; }
+            }
+            // If currently mounted, dismount so the cast doesn't fight the mount.
+            // Teleporting state's own retry loop will handle it if dismount stalls.
+            Transition(FateBotState.Teleporting);
+            return;
+        }
+
+        if (_condition[ConditionFlag.Mounted])
         {
             Transition(FateBotState.Traveling);
         }
@@ -1157,8 +1185,15 @@ public sealed class FateController : IDisposable
 
     private void TickTeleporting()
     {
-        // Arrived?
-        if (_clientState.TerritoryType == _pendingTeleportTerritory)
+        // Arrived? We only consider "arrived" AFTER the teleport has fired,
+        // otherwise an in-zone teleport (current territory == pending)
+        // exits this state immediately without ever calling Lifestream.
+        // BetweenAreas (loading) must have cleared too so we don't drop out
+        // mid-loading-screen.
+        if (_teleportFired
+            && _clientState.TerritoryType == _pendingTeleportTerritory
+            && !_condition[ConditionFlag.BetweenAreas]
+            && !_condition[ConditionFlag.BetweenAreas51])
         {
             // Make sure the world is ready before we hand off to Selecting.
             if (_objectTable.LocalPlayer == null) return;
