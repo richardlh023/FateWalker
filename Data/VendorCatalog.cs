@@ -80,8 +80,8 @@ public static class VendorCatalog
         new("Mahveydah",  "Thavnair",        169, 957, Expansion.EW, System.Array.Empty<VendorItem>()),
         new("Zawawa",     "Garlemald",       172, 958, Expansion.EW, System.Array.Empty<VendorItem>()),
         new("Tradingway", "Mare Lamentorum", 175, 959, Expansion.EW, System.Array.Empty<VendorItem>()),
-        new("Aisara",     "Elpis",           176, 960, Expansion.EW, System.Array.Empty<VendorItem>()),
-        new("N-1499",     "Ultima Thule",    181, 961, Expansion.EW, System.Array.Empty<VendorItem>()),
+        new("Aisara",     "Elpis",           176, 961, Expansion.EW, System.Array.Empty<VendorItem>()),
+        new("N-1499",     "Ultima Thule",    181, 960, Expansion.EW, System.Array.Empty<VendorItem>()),
 
         // ────────────── Dawntrail ──────────────
         new("Beryl", "Solution Nine", 217, 1186, Expansion.DT, new VendorItem[]

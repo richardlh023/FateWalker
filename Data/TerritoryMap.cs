@@ -29,10 +29,13 @@ public static class TerritoryMap
         new(957, 169, "Yedlihmad",        "Thavnair",                Expansion.EW),
         new(958, 172, "Camp Broken Glass","Garlemald",               Expansion.EW),
         new(959, 174, "Sinus Lacrimarum", "Mare Lamentorum",         Expansion.EW),
-        // NOTE: previous version had territory IDs swapped here. Lumina TerritoryType:
-        // 960 = Elpis, 961 = Ultima Thule. Cross-checked against questionable + community wiki.
-        new(960, 176, "Anagnorisis",      "Elpis",                   Expansion.EW),
-        new(961, 179, "Reah Tahra",       "Ultima Thule",            Expansion.EW),
+        // Verified via xivapi + Questionable's in-zone label: 960 = Ultima
+        // Thule, 961 = Elpis. The comment in earlier revisions claimed the
+        // opposite — confirmed wrong by a tester who saw her bot fight
+        // Elpis mobs (Venomous Python) while standing on what the UI thought
+        // was Ultima Thule.
+        new(960, 181, "Base Omicron",     "Ultima Thule",            Expansion.EW),
+        new(961, 176, "Anagnorisis",      "Elpis",                   Expansion.EW),
 
         // Dawntrail
         new(1187, 200, "Wachunpelo",       "Urqopacha",               Expansion.DT),
