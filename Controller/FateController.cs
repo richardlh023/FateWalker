@@ -44,6 +44,10 @@ public sealed class FateController : IDisposable
     private readonly ActionExecutor _action;
     private readonly FateSelector _selector;
     private readonly IDataManager _dataManager;
+    // Cache of (fateId → has-collect-item). Populated on first lookup.
+    // True = this FATE has an EventItem in Lumina (i.e. it's a Collect FATE
+    // where the player picks up items off the ground and turns them in).
+    private readonly Dictionary<uint, bool> _collectFateCache = new();
     private readonly IKeyState _keyState;
     private bool _rsrActivated;
     private bool _yesnoListenerRegistered;
@@ -1842,6 +1846,12 @@ public sealed class FateController : IDisposable
 
     private void ForcePullIfStuck()
     {
+        // Collect FATEs (bundle pickups + 10-stack hand-ins) want the bot to
+        // walk to ground items, not pull mobs. BossMod's FateUtils handles
+        // that flow but only while Player.InCombat is false — if we fire a
+        // force-pull we kick combat on and Pickup goal turns off.
+        if (IsCollectFate(_targetFateId)) return;
+
         var player = _objectTable.LocalPlayer;
         if (player == null) return;
         if (_condition[ConditionFlag.Mounted]) return;
@@ -1857,6 +1867,27 @@ public sealed class FateController : IDisposable
         var actionId = JobPullSpellMap.Resolve(player.ClassJob.RowId);
         var ok = _action.UseAction(actionId);
         LogAction($"Engaging: force-pull → UseAction({actionId}) on {target.Name.TextValue} → {ok}");
+    }
+
+    /// <summary>
+    /// True if the given FATE id has an associated EventItem in Lumina —
+    /// i.e. it's a "collect" FATE (pick items off the ground, turn in 10 at
+    /// a time to the objective NPC). Result is cached per id.
+    /// </summary>
+    private bool IsCollectFate(uint fateId)
+    {
+        if (fateId == 0) return false;
+        if (_collectFateCache.TryGetValue(fateId, out var cached)) return cached;
+        bool result = false;
+        try
+        {
+            var sheet = _dataManager.GetExcelSheet<Lumina.Excel.Sheets.Fate>();
+            if (sheet != null && sheet.TryGetRow(fateId, out var row))
+                result = row.EventItem.RowId != 0;
+        }
+        catch { }
+        _collectFateCache[fateId] = result;
+        return result;
     }
 
     private void KickIfStuckInEngaging()
@@ -1971,6 +2002,15 @@ public sealed class FateController : IDisposable
         var player = _objectTable.LocalPlayer;
         if (player == null) return;
         var playerId = player.GameObjectId;
+
+        // Collect-FATE branch: don't pull. The objective is to pick items
+        // off the ground and turn in 10 at a time. We just clear any pulled
+        // target so BossMod's FateUtils (Pickup/HandIn goals) can drive the
+        // movement via Hints.InteractWithTarget. We only re-engage if a mob
+        // happens to aggro on us — in which case the targeting loop below
+        // still finds it and locks in aggro/kill mode.
+        bool isCollect = IsCollectFate(_targetFateId);
+
         // Battalion = friend/enemy team. Player and allies share the same value;
         // hostile mobs use a different one. Used as the strict ally-exclusion
         // gate below in addition to the StatusFlags.Hostile check (some defence
@@ -2099,9 +2139,25 @@ public sealed class FateController : IDisposable
         if (aggro.Count >= _config.MaxAggroCount) _killPhaseLatch = true;
         if (aggro.Count == 0) _killPhaseLatch = false;
 
-        bool stillPulling = !_killPhaseLatch
+        // On a collect FATE we never *pull* — the goal is items, not kills.
+        // We still focus and kill anything that already aggro'd on us
+        // (defensive). When nothing is aggro'd we early-out so FateUtils'
+        // Pickup goal can take over movement.
+        bool stillPulling = !isCollect
+                         && !_killPhaseLatch
                          && aggro.Count < _config.MaxAggroCount
                          && unaggro.Count > 0;
+        if (isCollect && aggro.Count == 0)
+        {
+            // Drop any leftover commit and let FateUtils drive.
+            if (_pullCommitId != 0)
+            {
+                LogAction("collect-FATE: clearing pull commit so FateUtils can pick up items");
+                _pullCommitId = 0;
+                _pullCommitSetAt = DateTime.MinValue;
+            }
+            return;
+        }
 
         // Special case: committed mob just aggro'd while we still want more
         // pulls. Drop the commit so we can pick the next unaggro target.

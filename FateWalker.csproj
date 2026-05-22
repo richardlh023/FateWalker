@@ -6,9 +6,9 @@
         <LangVersion>latest</LangVersion>
         <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
         <Authors>RichardLH</Authors>
-        <Version>1.0.0.18</Version>
-        <AssemblyVersion>1.0.0.18</AssemblyVersion>
-        <FileVersion>1.0.0.18</FileVersion>
+        <Version>1.0.0.19</Version>
+        <AssemblyVersion>1.0.0.19</AssemblyVersion>
+        <FileVersion>1.0.0.19</FileVersion>
     </PropertyGroup>
 
     <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
