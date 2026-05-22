@@ -17,9 +17,10 @@ public sealed unsafe class ActionExecutor
     public ActionExecutor(IPluginLog log) { _log = log; }
 
     // General Action IDs (from FFXIV's GeneralAction Lumina sheet)
-    public const uint GA_MountRoulette = 9;
+    public const uint GA_Jump = 2;         // vnavmesh uses this for walk→fly liftoff + terrain unstick
     public const uint GA_Sprint = 4;
     public const uint GA_Return = 8;       // also fires "OK" on the death "Return to ..." dialog
+    public const uint GA_MountRoulette = 9;
     public const uint GA_Dismount = 23;
 
     // Role-action IDs (Action sheet). Second Wind is the universal phys-class
@@ -71,6 +72,19 @@ public sealed unsafe class ActionExecutor
         var am = ActionManager.Instance();
         if (am == null) return false;
         return am->UseAction(ActionType.GeneralAction, GA_Dismount);
+    }
+
+    /// <summary>
+    /// Fire General Action "Jump" (id 2). Same call vnavmesh itself uses
+    /// for walk→fly liftoff (see vnavmesh/Movement/FollowPath.cs:215). This
+    /// reliably triggers a jump regardless of whether vnavmesh is currently
+    /// hooking the move-input vector — bypasses keystate injection.
+    /// </summary>
+    public bool Jump()
+    {
+        var am = ActionManager.Instance();
+        if (am == null) return false;
+        return am->UseAction(ActionType.GeneralAction, GA_Jump);
     }
 
     /// <summary>

@@ -151,6 +151,12 @@ public sealed class FateController : IDisposable
     // vanishes from the object table (streaming hiccup mid-flight, server
     // tick lag, etc.). After the grace passes we re-evaluate.
     private DateTime _pullCommitSetAt = DateTime.MinValue;
+    // KILL-phase latch. Once the bot fills the configured pull size we
+    // stick on KILL until aggro hits 0 (whole batch cleared). Without
+    // this, the moment a mob dies aggro drops below MaxAggroCount and the
+    // bot dashes off to pull a new one — leaving 3 still-aggro'd mobs
+    // behind to leash + regen.
+    private bool _killPhaseLatch;
 
     // Throttle for the "no FATE mob in range" diagnostic log.
     private DateTime _lastNoFateMobLogAt = DateTime.MinValue;
@@ -1331,9 +1337,12 @@ public sealed class FateController : IDisposable
         // Skip when flying / mounted (jump press is a no-op or dismount),
         // skip when in combat (already busy), skip during cutscenes / loads.
         TryHumanizeJump();
-        // Random altitude wobble while flying — pilots don't fly perfectly
-        // flat. Adjusts on a tighter 8–25s cadence than the ground jump.
-        TryHumanizeAltitude();
+        // Altitude wobble was removed in v1.0.0.16: vnavmesh hooks the
+        // game's flight input vector directly, so any keystate we set for
+        // SPACE / Z / W is overridden every frame while pathing. No visible
+        // effect on altitude. If we want flight wobble later it has to go
+        // through a different mechanism (jitter the desired Y in waypoints,
+        // for example) rather than fighting the input hook.
         // Once we're within streaming range of the FATE, retarget navmesh to
         // the actual entity (mob or MotivationNpc) instead of the bot-rolled
         // landing offset. Lands the player right next to combat rather than
@@ -1685,16 +1694,21 @@ public sealed class FateController : IDisposable
     }
 
     /// <summary>
-    /// Random humanize jump — press space briefly via IKeyState. Fires on a
-    /// rolling 25–75s cadence while in Traveling, skipped when mounted/flying
-    /// (jump is a no-op), in combat, or in a cutscene/load. Setting the key
-    /// state to "down" for one frame is enough for the game's input handler
-    /// to register a tap.
+    /// Random humanize jump — fires GeneralAction.Jump (id 2) on a rolling
+    /// 25–75 s cadence while in Traveling. Two reasons we use the action
+    /// instead of IKeyState[Space]:
+    ///   1) vnavmesh hooks the game's RMIWalk input function and overrides
+    ///      keystate while pathing, so injected key presses do nothing
+    ///      during navmesh travel.
+    ///   2) vnavmesh itself uses this exact action for walk→fly liftoff
+    ///      (FollowPath.cs:215) — proven path.
+    /// Skipped while mounted (jump = dismount), flying, diving, in combat,
+    /// in cutscene, or loading.
     /// </summary>
     private void TryHumanizeJump()
     {
         if (_config.DryRun) return;
-        if (_condition[ConditionFlag.Mounted]) return;            // jump press = dismount, not jump
+        if (_condition[ConditionFlag.Mounted]) return;
         if (_condition[ConditionFlag.InFlight]) return;
         if (_condition[ConditionFlag.Diving]) return;
         if (_condition[ConditionFlag.InCombat]) return;
@@ -1708,62 +1722,13 @@ public sealed class FateController : IDisposable
             return;
         }
 
-        try
-        {
-            // VK_SPACE = 0x20. IKeyState handles the ephemeral down-bit
-            // clearing for us across frames.
-            _keyState[0x20] = true;
-            LogAction("humanize: tap jump");
-        }
-        catch (Exception ex)
-        {
-            _log.Warning(ex, "humanize jump failed");
-        }
+        try { _action.Jump(); LogAction("humanize: tap jump"); }
+        catch (Exception ex) { _log.Warning(ex, "humanize jump failed"); }
         _nextJumpAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(25, 76));
     }
 
-    /// <summary>
-    /// Altitude humanize for flying mounts. Holds W (forward) together with
-    /// SPACE (ascend) or Z (descend) so the bot keeps moving forward while
-    /// gaining/losing altitude — taping space alone makes the character
-    /// hover in place, which would look more bot-like than the baseline
-    /// flat flight we're trying to fix. The hold runs across a handful of
-    /// frames before clearing.
-    /// </summary>
-    private void TryHumanizeAltitude()
-    {
-        if (_config.DryRun) return;
-        if (!_condition[ConditionFlag.InFlight]) return;
-        if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51]) return;
-
-        // If a hold is in progress, keep re-asserting the keystate each frame
-        // (IKeyState clears the ephemeral down-bit aggressively).
-        if (DateTime.UtcNow < _altitudeHoldUntil)
-        {
-            try
-            {
-                _keyState[0x57] = true; // W
-                _keyState[_altitudeHoldKey] = true;
-            }
-            catch { }
-            return;
-        }
-
-        if (DateTime.UtcNow < _nextAltitudeAt)
-        {
-            if (_nextAltitudeAt == DateTime.MinValue)
-                _nextAltitudeAt = DateTime.UtcNow + TimeSpan.FromSeconds(_rng.Next(8, 26));
-            return;
-        }
-
-        // Roll a 250–600 ms hold so the wobble is visible but doesn't fight
-        // navmesh's path execution for too long.
-        bool up = _rng.Next(2) == 0;
-        _altitudeHoldKey = up ? (byte)0x20 /* SPACE */ : (byte)0x5A /* Z */;
-        _altitudeHoldUntil = DateTime.UtcNow + TimeSpan.FromMilliseconds(_rng.Next(250, 601));
-        LogAction(up ? "humanize: nudge altitude up (with W)" : "humanize: nudge altitude down (with W)");
-        _nextAltitudeAt = _altitudeHoldUntil + TimeSpan.FromSeconds(_rng.Next(8, 26));
-    }
+    // (altitude wobble removed in v1.0.0.16 — vnavmesh hooks the flight
+    // input vector; keystate injection has no effect during pathing.)
 
     /// <summary>
     /// When the bot is within Dalamud's object-table streaming radius of the
@@ -2122,15 +2087,21 @@ public sealed class FateController : IDisposable
             }
         }
 
-        // Two-phase pull-then-kill:
+        // Two-phase pull-then-kill with a KILL latch:
         //   PULL: aggro count below MaxAggroCount → keep picking up more
         //         mobs. Commit to one until it aggros, then immediately
-        //         start the next pull (don't sit on a now-aggro'd mob in
-        //         pull phase — that defeats the configured pull size).
-        //   KILL: aggro count ≥ MaxAggroCount, OR no more unaggro to pull
-        //         → focus down the closest aggro'd mob. Commit holds here
-        //         until the mob dies.
-        bool stillPulling = aggro.Count < _config.MaxAggroCount && unaggro.Count > 0;
+        //         start the next pull.
+        //   KILL: we've either filled the pull size or run out of unaggro
+        //         targets. Stays locked here until aggro hits 0 (whole
+        //         batch dead) — otherwise the moment one mob dies the
+        //         bot would dash off to grab a new pull and the rest of
+        //         the batch would leash + regen on the way back.
+        if (aggro.Count >= _config.MaxAggroCount) _killPhaseLatch = true;
+        if (aggro.Count == 0) _killPhaseLatch = false;
+
+        bool stillPulling = !_killPhaseLatch
+                         && aggro.Count < _config.MaxAggroCount
+                         && unaggro.Count > 0;
 
         // Special case: committed mob just aggro'd while we still want more
         // pulls. Drop the commit so we can pick the next unaggro target.
@@ -3352,8 +3323,10 @@ public sealed class FateController : IDisposable
         // Each entry into Teleporting must fire Lifestream.Teleport exactly once.
         if (next == FateBotState.Teleporting) _teleportFired = false;
 
-        // Clear pull-commit on every state change — only valid within Engaging.
+        // Clear pull-commit + kill latch on every state change — both are
+        // only valid within an active Engaging cycle.
         _pullCommitId = 0;
+        _killPhaseLatch = false;
 
         // Clear humanize timers — they belong to specific actions, not states.
         _pendingSelectYesnoAt = null;
@@ -3494,6 +3467,22 @@ public sealed class FateController : IDisposable
         if (DateTime.UtcNow - _lastGenericStuckLogAt < TimeSpan.FromSeconds(15)) return;
         _lastGenericStuckLogAt = DateTime.UtcNow;
         LogAction($"watchdog: no movement for {stillSec:F0}s in {State} at ({player.Position.X:F0}, {player.Position.Y:F0}, {player.Position.Z:F0})");
+
+        // Stuck-jump recovery: when no movement for 15 s while on the ground
+        // (not in combat, not flying), fire General Action Jump. Tiny rocks,
+        // tree roots, fence posts etc. can pin a player against navmesh
+        // geometry; a single jump unsticks ~80 % of cases per vnavmesh
+        // community-issue threads. Skipped in flight (jump is a no-op there)
+        // and in combat (movement is BossMod's responsibility, not ours).
+        if (!_config.DryRun
+            && !_condition[ConditionFlag.Mounted] // mount jump = dismount
+            && !_condition[ConditionFlag.InFlight]
+            && !_condition[ConditionFlag.InCombat]
+            && !_condition[ConditionFlag.OccupiedInCutSceneEvent])
+        {
+            try { _action.Jump(); LogAction("watchdog: stuck-jump"); }
+            catch (Exception ex) { _log.Warning(ex, "stuck-jump failed"); }
+        }
     }
 
     /// <summary>
