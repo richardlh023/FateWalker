@@ -146,6 +146,11 @@ public sealed class FateController : IDisposable
     // farthest-mob ordering keeps shuffling as we move toward the previous
     // pick, causing the bot to zig-zag between distant mobs and never engage.
     private ulong _pullCommitId;
+    // Tracks when the current pull-commit was first issued. Used as a grace
+    // window — we don't drop the commit just because the mob briefly
+    // vanishes from the object table (streaming hiccup mid-flight, server
+    // tick lag, etc.). After the grace passes we re-evaluate.
+    private DateTime _pullCommitSetAt = DateTime.MinValue;
 
     // Throttle for the "no FATE mob in range" diagnostic log.
     private DateTime _lastNoFateMobLogAt = DateTime.MinValue;
@@ -2049,7 +2054,13 @@ public sealed class FateController : IDisposable
             // radius × 1.5 as a buffer — defence FATEs have mobs walking IN
             // from the periphery that legitimately sit outside the strict
             // radius for a few seconds.
-            if (_targetFateRadius > 0)
+            //
+            // Exemption: the mob we ALREADY committed to (_pullCommitId) is
+            // always allowed through. Otherwise when we chase a wandering
+            // pull target out past 1.5 × radius, the filter drops it, the
+            // commit dies, and the next tick picks a different mob —
+            // exactly the "target keeps swapping mid-pull" tester report.
+            if (_targetFateRadius > 0 && npc.GameObjectId != _pullCommitId)
             {
                 var fateDist2D = Vector2.Distance(
                     new Vector2(npc.Position.X, npc.Position.Z),
@@ -2096,7 +2107,22 @@ public sealed class FateController : IDisposable
                 var unHit = unaggro.FirstOrDefault(x => x.npc.GameObjectId == _pullCommitId);
                 if (unHit.npc != null) { committedMob = unHit.npc; commitStillValid = true; }
             }
-            if (!commitStillValid) _pullCommitId = 0;
+            if (!commitStillValid)
+            {
+                // Grace period: hold the commit for up to 4 s of "mob not
+                // visible" before giving up. Brief object-table churn
+                // shouldn't be enough to flip our pull target.
+                var commitAge = DateTime.UtcNow - _pullCommitSetAt;
+                if (commitAge < TimeSpan.FromSeconds(4))
+                {
+                    // Stay committed but no live mob ref this tick — just
+                    // return so we keep walking toward the last known
+                    // direction without picking a new mob.
+                    return;
+                }
+                LogAction($"pull commit dropped: target {_pullCommitId} not visible after {commitAge.TotalSeconds:F1}s grace");
+                _pullCommitId = 0;
+            }
         }
 
         if (commitStillValid && !(inClearMode && !commitIsAggro))
@@ -2110,12 +2136,14 @@ public sealed class FateController : IDisposable
             pick = aggro.OrderBy(x => x.dist).First().npc;
             mode = $"clear ({aggro.Count}/{_config.MaxAggroCount})";
             _pullCommitId = pick.GameObjectId;
+            _pullCommitSetAt = DateTime.UtcNow;
         }
         else if (aggro.Count > 0)
         {
             pick = aggro.OrderBy(x => x.dist).First().npc;
             mode = $"kill ({aggro.Count} aggro)";
             _pullCommitId = pick.GameObjectId;
+            _pullCommitSetAt = DateTime.UtcNow;
         }
         else
         {
@@ -2135,6 +2163,7 @@ public sealed class FateController : IDisposable
             pick = sorted.First().npc;
             mode = _config.RsrUseAutoFarthest ? "pull farthest" : "pull nearest";
             _pullCommitId = pick.GameObjectId;
+            _pullCommitSetAt = DateTime.UtcNow;
         }
 
         // Compare by GameObjectId — ITargetManager.Target wrappers may not be
