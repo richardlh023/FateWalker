@@ -77,6 +77,19 @@ public static class JobModuleMap
     /// hitbox so weaponskills land); everything else = 25y (within standard
     /// caster/healer cast range, no need to move closer).
     /// </summary>
+    /// <summary>
+    /// BossMod NormalMovement / StayCloseToTarget keeps the player within
+    /// this many yalms of the locked target.
+    ///
+    /// Melee weaponskill range is 3 y, so traditionally 2.6 was used to
+    /// "stop just inside hitbox" — but with the mob's own hitbox plus a
+    /// player hitbox the safety margin became too tight, and the smallest
+    /// mob movement made BossMod constantly micro-correct (visible as
+    /// shuffle-stepping). 3.2 y gives ~0.6 y of slack, still landing every
+    /// melee GCD, dramatically smoother movement.
+    ///
+    /// Ranged / caster jobs stay at 25 y — well inside their ability range.
+    /// </summary>
     public static float GetTargetRange(uint classJobId) =>
-        MeleeOrTankJobs.Contains(classJobId) ? 2.6f : 25f;
+        MeleeOrTankJobs.Contains(classJobId) ? 3.2f : 25f;
 }
