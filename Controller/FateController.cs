@@ -1637,16 +1637,13 @@ public sealed class FateController : IDisposable
 
                 if (_config.CombatBackend == Configuration.CombatBackendKind.RSR)
                 {
-                    if (_config.RsrUseAutoFarthest)
-                    {
-                        LogAction("RSR.ActivateAuto(Farthest)");
-                        _rsr.ActivateAuto(RsrIpc.TargetingType.Farthest);
-                    }
-                    else
-                    {
-                        LogAction("RSR.Activate (Manual mode + TargetFreely)");
-                        _rsr.Activate();
-                    }
+                    // Always Manual + TargetFreely. RSR casts on whatever
+                    // target WE locked — keeps the pull-nearest + sticky
+                    // commit honest. The old RsrUseAutoFarthest "wall-to-
+                    // wall" mode let RSR pick its own farthest target,
+                    // which fought our pick.
+                    LogAction("RSR.Activate (Manual mode + TargetFreely)");
+                    _rsr.Activate();
                     _rsrActivated = true;
                 }
 
@@ -2125,29 +2122,61 @@ public sealed class FateController : IDisposable
             }
         }
 
-        if (commitStillValid && !(inClearMode && !commitIsAggro))
+        // Two-phase pull-then-kill:
+        //   PULL: aggro count below MaxAggroCount → keep picking up more
+        //         mobs. Commit to one until it aggros, then immediately
+        //         start the next pull (don't sit on a now-aggro'd mob in
+        //         pull phase — that defeats the configured pull size).
+        //   KILL: aggro count ≥ MaxAggroCount, OR no more unaggro to pull
+        //         → focus down the closest aggro'd mob. Commit holds here
+        //         until the mob dies.
+        bool stillPulling = aggro.Count < _config.MaxAggroCount && unaggro.Count > 0;
+
+        // Special case: committed mob just aggro'd while we still want more
+        // pulls. Drop the commit so we can pick the next unaggro target.
+        if (commitStillValid && stillPulling && commitIsAggro)
         {
-            // Keep committed target. Re-set if game cleared our pick.
-            pick = committedMob;
-            mode = "commit";
+            _pullCommitId = 0;
+            _pullCommitSetAt = DateTime.MinValue;
+            commitStillValid = false;
+            committedMob = null;
+            commitIsAggro = false;
         }
-        else if (inClearMode)
+
+        // Clear-mode safety (too many aggro on us): focus aggro'd over an
+        // unaggro commit, even mid-pull. Otherwise we keep wandering toward
+        // a new pull while getting clobbered.
+        if (commitStillValid && inClearMode && !commitIsAggro)
         {
-            pick = aggro.OrderBy(x => x.dist).First().npc;
-            mode = $"clear ({aggro.Count}/{_config.MaxAggroCount})";
+            _pullCommitId = 0;
+            commitStillValid = false;
+            committedMob = null;
+        }
+
+        if (commitStillValid)
+        {
+            pick = committedMob;
+            mode = commitIsAggro ? "kill (commit)" : "pull (commit)";
+        }
+        else if (stillPulling)
+        {
+            pick = unaggro.OrderBy(x => x.dist).First().npc;
+            mode = $"pull nearest ({aggro.Count}/{_config.MaxAggroCount} aggro)";
             _pullCommitId = pick.GameObjectId;
             _pullCommitSetAt = DateTime.UtcNow;
         }
         else if (aggro.Count > 0)
         {
             pick = aggro.OrderBy(x => x.dist).First().npc;
-            mode = $"kill ({aggro.Count} aggro)";
+            mode = inClearMode
+                ? $"clear ({aggro.Count}/{_config.MaxAggroCount})"
+                : $"kill ({aggro.Count} aggro)";
             _pullCommitId = pick.GameObjectId;
             _pullCommitSetAt = DateTime.UtcNow;
         }
         else
         {
-            // Pull mode — no aggro yet, no live commit.
+            // Nothing aggro'd AND nothing to pull → idle.
             if (unaggro.Count == 0)
             {
                 if (DateTime.UtcNow - _lastNoFateMobLogAt > TimeSpan.FromSeconds(10))
@@ -2157,13 +2186,7 @@ public sealed class FateController : IDisposable
                 }
                 return;
             }
-            var sorted = _config.RsrUseAutoFarthest
-                ? unaggro.OrderByDescending(x => x.dist)
-                : unaggro.OrderBy(x => x.dist);
-            pick = sorted.First().npc;
-            mode = _config.RsrUseAutoFarthest ? "pull farthest" : "pull nearest";
-            _pullCommitId = pick.GameObjectId;
-            _pullCommitSetAt = DateTime.UtcNow;
+            return;
         }
 
         // Compare by GameObjectId — ITargetManager.Target wrappers may not be

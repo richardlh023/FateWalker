@@ -521,16 +521,9 @@ public sealed class MainWindow : Window, IDisposable
         if (current == Configuration.CombatBackendKind.RSR)
         {
             ImGui.Indent(16f);
-            var auto = cfg.RsrUseAutoFarthest;
-            if (ImGui.Checkbox("RSR Auto + Farthest (pull along the way)", ref auto))
-            {
-                cfg.RsrUseAutoFarthest = auto;
-                _plugin.SaveConfig();
-            }
-            ImGui.SameLine();
-            ImGui.TextDisabled(auto
-                ? "RSR picks farthest mob; BossMod won't retarget"
-                : "BossMod picks closest; RSR casts on it");
+            ImGui.TextDisabled("RSR runs in Manual mode — casts on the mob the bot locks. " +
+                              "Pull strategy is fixed to nearest-unaggro + sticky commit, " +
+                              "respecting the Max aggro setting below.");
             ImGui.Unindent(16f);
         }
 
