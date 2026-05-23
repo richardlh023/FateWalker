@@ -2025,6 +2025,42 @@ public sealed class FateController : IDisposable
         // pull.
         var aggro = new List<(IBattleNpc npc, float dist)>();
         var unaggro = new List<(IBattleNpc npc, float dist)>();
+        // Forlorn / Forlorn Maiden — special aggressive elites that spawn at
+        // ~50 % FATE progress and drop the "Twist of Fate" bonus-gemstone
+        // buff (Maiden = +25 %, The Forlorn rare = +300 %). NameIDs come
+        // from BossMod's AutoTarget (which also prioritises them).
+        // Pre-scan: if one is in the object table for our active FATE, lock
+        // onto it BEFORE the normal pull/kill logic — bypassing the radius
+        // filter and distance pick so we don't end up chasing trash while
+        // a Forlorn rots untouched at the FATE edge.
+        const uint NameId_Forlorn = 6737;
+        const uint NameId_ForlornMaiden = 6738;
+        IBattleNpc? forlorn = null;
+        foreach (var obj in _objectTable)
+        {
+            if (obj is not IBattleNpc npc) continue;
+            if (npc.ObjectKind != ObjectKind.BattleNpc) continue;
+            if (npc.IsDead) continue;
+            if (npc.NameId != NameId_Forlorn && npc.NameId != NameId_ForlornMaiden) continue;
+            var go = (CSGameObject*)(void*)npc.Address;
+            if (go == null || go->FateId != _targetFateId) continue;
+            forlorn = npc;
+            break;
+        }
+        if (forlorn != null)
+        {
+            // Direct lock — committed for the rest of this Forlorn's life.
+            if (_pullCommitId != forlorn.GameObjectId)
+            {
+                _pullCommitId = forlorn.GameObjectId;
+                _pullCommitSetAt = DateTime.UtcNow;
+                _killPhaseLatch = true;  // bypass the "pull more first" logic
+                if (_targetManager.Target?.GameObjectId != forlorn.GameObjectId)
+                    _targetManager.Target = forlorn;
+                LogAction($"FATE-target [forlorn priority] → {forlorn.Name.TextValue} (NameId={forlorn.NameId}) — +Twist of Fate gem bonus");
+            }
+            return;
+        }
 
         foreach (var obj in _objectTable)
         {
