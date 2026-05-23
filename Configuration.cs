@@ -263,15 +263,31 @@ public sealed class Configuration : IPluginConfiguration
     /// <summary>
     /// Hard session cap (hours). Bot stops or pauses after this many continuous
     /// hours. 4 hours matches Miqobot-era community consensus.
+    ///
+    /// At runtime the actual cap is rolled in [SessionCapHours − Jitter,
+    /// SessionCapHours + Jitter] so a watcher can't predict the bot's
+    /// break cadence — a fixed 4h-on / 30m-off cycle is a strong bot signal.
     /// </summary>
     public int SessionCapHours { get; set; } = 4;
+
+    /// <summary>± jitter applied to <see cref="SessionCapHours"/> per session
+    /// (in HOURS, fractional). 0 = no jitter. Default 0.5 → effective cap
+    /// lands somewhere in [3.5 h, 4.5 h] each time.</summary>
+    public double SessionCapHoursJitter { get; set; } = 0.5;
 
     /// <summary>
     /// Minutes to pause (macro-break) when the session cap is hit before
     /// auto-resuming with a fresh session timer. 0 = hard stop. 30 min matches
     /// the article's "macro-break" pattern (return to city + AFK).
+    ///
+    /// As with SessionCapHours, the actual pause duration is rolled within
+    /// ± Jitter on each trigger.
     /// </summary>
     public int SessionCapPauseMinutes { get; set; } = 30;
+
+    /// <summary>± jitter applied to <see cref="SessionCapPauseMinutes"/> per
+    /// trigger. Default 10 → 20–40 min pauses.</summary>
+    public int SessionCapPauseMinutesJitter { get; set; } = 10;
 
     // ─────────────────────────────── Trading ─────────────────────────────
 

@@ -241,6 +241,9 @@ public sealed class FateController : IDisposable
     private int _sessionPanicEscapes;
     private int _sessionRepairTrips;
     private int _sessionStartGemCount;
+    // Per-session randomised session cap (hours). Rolled fresh on Start()
+    // and on every Paused → resume so a watcher can't predict break cadence.
+    private double _sessionCapHoursRolled;
     private DateTime _lastStatsLogAt = DateTime.MinValue;
 
     // Plugin-availability change tracker (warn when an IPC dependency drops).
@@ -526,6 +529,7 @@ public sealed class FateController : IDisposable
         _sessionPanicEscapes = 0;
         _sessionRepairTrips = 0;
         _sessionStartGemCount = Math.Max(0, FateWalker.Data.CurrencyReader.GetBicolorGemstoneCount());
+        _sessionCapHoursRolled = RollSessionCapHours();
         _sessionLoopRecoveries = 0;
         _loopRecoveryCount = 0;
         _logFingerprints.Clear();
@@ -798,19 +802,20 @@ public sealed class FateController : IDisposable
             && State != FateBotState.Dying
             && State != FateBotState.Repairing
             && State != FateBotState.Trading
-            && _sessionStartedAt != null && _config.SessionCapHours > 0
-            && DateTime.UtcNow - _sessionStartedAt.Value > TimeSpan.FromHours(_config.SessionCapHours))
+            && _sessionStartedAt != null && _sessionCapHoursRolled > 0
+            && DateTime.UtcNow - _sessionStartedAt.Value > TimeSpan.FromHours(_sessionCapHoursRolled))
         {
-            var pause = _config.SessionCapPauseMinutes;
+            var pause = RollSessionPauseMinutes();
+            var capHrsDisplay = _sessionCapHoursRolled.ToString("F1");
             if (pause > 0)
             {
-                _chatGui.Print($"[FateWalker] session cap reached ({_config.SessionCapHours}h) — macro-break {pause}m.");
-                EnterPauseSafely(pause, $"session cap {_config.SessionCapHours}h", resetSessionTimer: true);
+                _chatGui.Print($"[FateWalker] session cap reached ({capHrsDisplay}h) — macro-break {pause}m.");
+                EnterPauseSafely(pause, $"session cap {capHrsDisplay}h", resetSessionTimer: true);
             }
             else
             {
-                LogAction($"session cap reached ({_config.SessionCapHours}h) — stopping");
-                _chatGui.Print($"[FateWalker] session cap reached ({_config.SessionCapHours}h) — stopped.");
+                LogAction($"session cap reached ({capHrsDisplay}h) — stopping");
+                _chatGui.Print($"[FateWalker] session cap reached ({capHrsDisplay}h) — stopped.");
                 Stop();
             }
             return;
@@ -2192,6 +2197,16 @@ public sealed class FateController : IDisposable
                 _pullCommitId = 0;
                 _pullCommitSetAt = DateTime.MinValue;
             }
+            // ALSO clear the hard target. Otherwise BossMod / RSR keep casting
+            // on whatever stale mob was last locked, which counts as combat
+            // and disables FateUtils' Pickup goal. Without this clear the bot
+            // visibly runs at a distant mob to attack instead of grabbing
+            // the bundle on the ground in front of it.
+            if (_targetManager.Target != null)
+            {
+                LogAction($"collect-FATE: clearing stale target '{_targetManager.Target.Name.TextValue}' so pickup can run");
+                _targetManager.Target = null;
+            }
             return;
         }
 
@@ -2412,10 +2427,45 @@ public sealed class FateController : IDisposable
         if (DateTime.UtcNow < _pauseEndsAt) return;
 
         // Timer elapsed — resume.
-        if (_pauseResetSessionTimer) _sessionStartedAt = DateTime.UtcNow;
-        LogAction($"resume after pause ({_pauseReason})");
+        if (_pauseResetSessionTimer)
+        {
+            _sessionStartedAt = DateTime.UtcNow;
+            _sessionCapHoursRolled = RollSessionCapHours(); // fresh roll for the new chunk
+            LogAction($"resume after pause ({_pauseReason}) — next cap rolled to {_sessionCapHoursRolled:F1}h");
+        }
+        else
+        {
+            LogAction($"resume after pause ({_pauseReason})");
+        }
         _pauseReason = "";
         Transition(FateBotState.Selecting);
+    }
+
+    /// <summary>
+    /// Roll the per-session "actual" cap in hours: base ± Jitter (uniform).
+    /// Returning 0 disables the cap. Jitter is clipped so we never roll
+    /// below 0.5 h to avoid pathological tight loops.
+    /// </summary>
+    private double RollSessionCapHours()
+    {
+        if (_config.SessionCapHours <= 0) return 0;
+        var baseH = (double)_config.SessionCapHours;
+        var jitter = Math.Max(0, _config.SessionCapHoursJitter);
+        if (jitter <= 0) return baseH;
+        // _rng.NextDouble() is [0,1); shift to [-1,1) then scale.
+        var offset = (_rng.NextDouble() * 2.0 - 1.0) * jitter;
+        return Math.Max(0.5, baseH + offset);
+    }
+
+    /// <summary>Roll one session-cap pause duration: base ± Jitter (uniform, minutes).</summary>
+    private int RollSessionPauseMinutes()
+    {
+        var baseMin = _config.SessionCapPauseMinutes;
+        if (baseMin <= 0) return 0;
+        var jitter = Math.Max(0, _config.SessionCapPauseMinutesJitter);
+        if (jitter <= 0) return baseMin;
+        var offset = _rng.Next(-jitter, jitter + 1);
+        return Math.Max(1, baseMin + offset);
     }
 
     /// <summary>
