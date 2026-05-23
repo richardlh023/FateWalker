@@ -198,6 +198,13 @@ public sealed class FateController : IDisposable
     // Random humanize jump during long walks (Traveling). Rolls a fresh
     // 25–75s interval after each fire so cadence isn't a giveaway.
     private DateTime _nextJumpAt = DateTime.MinValue;
+    // Movement gate for humanize jump — we only tap jump when actually
+    // walking (covered ≥ 5 y in the last 4 s window). Standing-still jumps
+    // look more bot-like than the perfectly-still autorun we're trying to
+    // mask, per tester feedback.
+    private DateTime _jumpMoveSampleAt = DateTime.MinValue;
+    private Vector3 _jumpMoveSamplePos = Vector3.Zero;
+    private float _jumpMoveSampleDist;
     // Random humanize altitude nudge while flying (Traveling). Smaller
     // window than jump — pilots fidget more than walkers.
     private DateTime _nextAltitudeAt = DateTime.MinValue;
@@ -1710,15 +1717,11 @@ public sealed class FateController : IDisposable
 
     /// <summary>
     /// Random humanize jump — fires GeneralAction.Jump (id 2) on a rolling
-    /// 25–75 s cadence while in Traveling. Two reasons we use the action
-    /// instead of IKeyState[Space]:
-    ///   1) vnavmesh hooks the game's RMIWalk input function and overrides
-    ///      keystate while pathing, so injected key presses do nothing
-    ///      during navmesh travel.
-    ///   2) vnavmesh itself uses this exact action for walk→fly liftoff
-    ///      (FollowPath.cs:215) — proven path.
-    /// Skipped while mounted (jump = dismount), flying, diving, in combat,
-    /// in cutscene, or loading.
+    /// 25–75 s cadence ONLY while the player has been continuously walking.
+    /// Humans tap jump during long runs; an idle player standing still
+    /// suddenly bouncing in place is strange. Skipped while mounted /
+    /// flying / in combat / cutscene / loading. Also skipped when the
+    /// player isn't really moving (haven't covered > 5 y in the last 4 s).
     /// </summary>
     private void TryHumanizeJump()
     {
@@ -1729,6 +1732,19 @@ public sealed class FateController : IDisposable
         if (_condition[ConditionFlag.InCombat]) return;
         if (_condition[ConditionFlag.OccupiedInCutSceneEvent]) return;
         if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51]) return;
+
+        var player = _objectTable.LocalPlayer;
+        if (player == null) return;
+
+        // Movement-gate: only count "walking" if we've covered at least 5 y
+        // in the last ~4 s. Reset distance tracker every 4 s of sampling.
+        if (DateTime.UtcNow - _jumpMoveSampleAt > TimeSpan.FromSeconds(4))
+        {
+            _jumpMoveSampleAt = DateTime.UtcNow;
+            _jumpMoveSampleDist = Vector3.Distance(player.Position, _jumpMoveSamplePos);
+            _jumpMoveSamplePos = player.Position;
+        }
+        if (_jumpMoveSampleDist < 5f) return;
 
         if (DateTime.UtcNow < _nextJumpAt)
         {
@@ -3674,21 +3690,54 @@ public sealed class FateController : IDisposable
         _lastGenericStuckLogAt = DateTime.UtcNow;
         LogAction($"watchdog: no movement for {stillSec:F0}s in {State} at ({player.Position.X:F0}, {player.Position.Y:F0}, {player.Position.Z:F0})");
 
-        // Stuck-jump recovery: when no movement for 15 s while on the ground
-        // (not in combat, not flying), fire General Action Jump. Tiny rocks,
-        // tree roots, fence posts etc. can pin a player against navmesh
-        // geometry; a single jump unsticks ~80 % of cases per vnavmesh
-        // community-issue threads. Skipped in flight (jump is a no-op there)
-        // and in combat (movement is BossMod's responsibility, not ours).
-        if (!_config.DryRun
-            && !_condition[ConditionFlag.Mounted] // mount jump = dismount
-            && !_condition[ConditionFlag.InFlight]
-            && !_condition[ConditionFlag.InCombat]
-            && !_condition[ConditionFlag.OccupiedInCutSceneEvent])
+        // Progressive stuck-recovery escalation. Each level only fires once
+        // per stuck window — we reset on the next movement (top of method).
+        //   15 s — stuck-jump (cheap, fixes ~80 % of pin-against-geometry)
+        //   30 s — cancel current path + re-pathfind. vnav sometimes locks
+        //          on a path that the player physically can't execute (a
+        //          rock not in the navmesh, an unintended ledge). A fresh
+        //          plan from current position usually picks a different
+        //          route around the obstacle.
+        //   60 s — full relocate: teleport to the zone's primary aetheryte.
+        //          We've exhausted local recovery; better to lose 10 s to a
+        //          loading screen than block forever.
+        bool canAct = !_config.DryRun
+                   && !_condition[ConditionFlag.Mounted]
+                   && !_condition[ConditionFlag.InFlight]
+                   && !_condition[ConditionFlag.InCombat]
+                   && !_condition[ConditionFlag.OccupiedInCutSceneEvent]
+                   && !_condition[ConditionFlag.BetweenAreas]
+                   && !_condition[ConditionFlag.BetweenAreas51];
+        if (!canAct) return;
+
+        if (stillSec >= 60)
         {
-            try { _action.Jump(); LogAction("watchdog: stuck-jump"); }
-            catch (Exception ex) { _log.Warning(ex, "stuck-jump failed"); }
+            var zone = TerritoryMap.Lookup(_clientState.TerritoryType);
+            if (zone != null && _lifestream.IsAvailable)
+            {
+                LogAction($"watchdog: stuck {stillSec:F0}s — teleport to {zone.AetheryteName} to relocate");
+                try { _navmesh.Stop(); } catch {}
+                try { _lifestream.Teleport(zone.AetheryteId, 0); } catch {}
+                _genericLastMoveAt = DateTime.UtcNow; // pause escalation; teleport gives a clean slate
+                return;
+            }
         }
+        if (stillSec >= 30)
+        {
+            // Re-pathfind to current target / FATE waypoint.
+            Vector3? dst = _targetManager.Target?.Position
+                        ?? (_targetFatePos != Vector3.Zero ? _targetFatePos : (Vector3?)null);
+            if (dst.HasValue)
+            {
+                LogAction($"watchdog: stuck {stillSec:F0}s — cancel path + re-pathfind to ({dst.Value.X:F0},{dst.Value.Y:F0},{dst.Value.Z:F0})");
+                try { _navmesh.Stop(); } catch {}
+                try { _navmesh.PathfindAndMoveCloseTo(dst.Value, fly: true, range: 3f); } catch {}
+                return;
+            }
+        }
+        // 15s: jump
+        try { _action.Jump(); LogAction("watchdog: stuck-jump"); }
+        catch (Exception ex) { _log.Warning(ex, "stuck-jump failed"); }
     }
 
     /// <summary>

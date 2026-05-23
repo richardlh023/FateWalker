@@ -317,7 +317,7 @@ public sealed class MainWindow : Window, IDisposable
 
         var drought = cfg.MinDroughtSeconds;
         ImGui.SetNextItemWidth(180f);
-        if (ImGui.SliderInt("drought before rotate (s)", ref drought, 60, 600))
+        if (ImGui.SliderInt("drought before rotate (s)", ref drought, 10, 600))
         {
             cfg.MinDroughtSeconds = drought;
             changed = true;
