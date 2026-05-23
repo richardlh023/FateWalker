@@ -48,6 +48,10 @@ public sealed class FateController : IDisposable
     // True = this FATE has an EventItem in Lumina (i.e. it's a Collect FATE
     // where the player picks up items off the ground and turns them in).
     private readonly Dictionary<uint, bool> _collectFateCache = new();
+    // Tracks the BossMod AutoTarget Retarget mode we last pushed so we
+    // don't spam the IPC every tick. "Never" while picking up collect-FATE
+    // items, "NoTarget" otherwise.
+    private string _currentRetargetMode = "";
     private readonly IKeyState _keyState;
     private bool _rsrActivated;
     private bool _yesnoListenerRegistered;
@@ -534,6 +538,7 @@ public sealed class FateController : IDisposable
         _loopRecoveryCount = 0;
         _logFingerprints.Clear();
         _currentMoveDelay = "None"; // matches BossMod track default; re-applied on activation
+        _currentRetargetMode = "";  // force re-apply on first EnforceFateMobTarget
         _lastStatsLogAt = DateTime.UtcNow;
         _lastNavAvail = _navmesh.IsAvailable;
         _lastBossModAvail = _bossmod.IsAvailable;
@@ -1673,6 +1678,7 @@ public sealed class FateController : IDisposable
                 {
                     LogAction("BossMod AutoTarget Retarget=NoTarget (we own targeting)");
                     _bossmod.SetAutoTargetRetarget("NoTarget");
+                    _currentRetargetMode = "NoTarget";
                 }
             }
             _bossmodActivated = true;
@@ -1875,6 +1881,24 @@ public sealed class FateController : IDisposable
     }
 
     /// <summary>
+    /// Push a BossMod AutoTarget Retarget value only when it actually
+    /// changes — avoids spamming the IPC every tick.
+    /// </summary>
+    private void EnsureRetargetMode(string mode)
+    {
+        if (_currentRetargetMode == mode) return;
+        if (!_bossmodActivated) return;
+        if (!_config.RestrictTargetingToFateMobs) return;
+        try
+        {
+            _bossmod.SetAutoTargetRetarget(mode);
+            _currentRetargetMode = mode;
+            LogAction($"BossMod AutoTarget Retarget → {mode}");
+        }
+        catch (Exception ex) { _log.Warning(ex, $"SetAutoTargetRetarget({mode}) failed"); }
+    }
+
+    /// <summary>
     /// True if the given FATE id has an associated EventItem in Lumina —
     /// i.e. it's a "collect" FATE (pick items off the ground, turn in 10 at
     /// a time to the objective NPC). Result is cached per id.
@@ -1899,7 +1923,6 @@ public sealed class FateController : IDisposable
     {
         var player = _objectTable.LocalPlayer;
         if (player == null) return;
-        if (_condition[ConditionFlag.Mounted]) return; // dismount handler in charge
 
         // Track in-combat so we don't kick during active fighting.
         if (_condition[ConditionFlag.InCombat])
@@ -1912,7 +1935,15 @@ public sealed class FateController : IDisposable
         if (target == null) return;
 
         var dist = Vector3.Distance(target.Position, player.Position);
-        if (dist < 6f) return; // close enough, BossMod can handle
+        var dy = target.Position.Y - player.Position.Y;
+        bool yMismatch = Math.Abs(dy) > 5f;
+
+        // BossMod's StayCloseToTarget reports "in range" based on XZ distance
+        // + hitbox surface, so a mob that's 3 y away horizontally but 8 y
+        // below us reads as "close enough" — bot stands on the ledge
+        // glaring at the mob, never attacks. Detect that case here and
+        // re-pathfind regardless of the 6 y horizontal cutoff.
+        if (!yMismatch && dist < 6f) return;
 
         // Need ≥ 8s of "out of combat with a far FATE target" before kicking,
         // and only retry every 5s so we don't fight BossMod's own movement.
@@ -1920,6 +1951,31 @@ public sealed class FateController : IDisposable
         if (DateTime.UtcNow - _lastEngagingKickAt   < TimeSpan.FromSeconds(5)) return;
         _lastEngagingKickAt = DateTime.UtcNow;
 
+        // Y-mismatch escape: mob is on a different terrain layer. Ground
+        // pathing can't always get there (vnav stops at cliff edges, etc.).
+        // Mount → take off → fly path → land near mob.
+        if (yMismatch)
+        {
+            if (!_condition[ConditionFlag.Mounted])
+            {
+                LogAction($"Engaging: target {dy:+0.0;-0.0}y vertical offset — mounting to fly across");
+                _action.UseMountRoulette();
+                return;
+            }
+            if (!_condition[ConditionFlag.InFlight])
+            {
+                LogAction("Engaging: mounted, jumping to take off");
+                _action.Jump();
+                return;
+            }
+            LogAction($"Engaging: fly-path to {target.Name.TextValue} (dy={dy:+0.0;-0.0}, dist={dist:F1}y)");
+            _navmesh.PathfindAndMoveCloseTo(target.Position, fly: true, range: 3f);
+            return;
+        }
+
+        // Same-level but far away → ground walk. Dismount handler will land
+        // us when navmesh stops near the mob.
+        if (_condition[ConditionFlag.Mounted]) return; // dismount handler in charge
         LogAction($"Engaging: stranded ({dist:F1}y from target, OOC) — kick vnavmesh ground-walk to {target.Name.TextValue}");
         _navmesh.PathfindAndMoveCloseTo(target.Position, fly: false, range: 3f);
     }
@@ -2197,11 +2253,15 @@ public sealed class FateController : IDisposable
                 _pullCommitId = 0;
                 _pullCommitSetAt = DateTime.MinValue;
             }
-            // ALSO clear the hard target. Otherwise BossMod / RSR keep casting
-            // on whatever stale mob was last locked, which counts as combat
-            // and disables FateUtils' Pickup goal. Without this clear the bot
-            // visibly runs at a distant mob to attack instead of grabbing
-            // the bundle on the ground in front of it.
+            // Tell BossMod's AutoTarget to NEVER auto-pick a target. Default
+            // "NoTarget" lets BossMod set an initial target — which here
+            // means it grabs a nearby mob the instant we clear ours, and
+            // RSR ranged-casts on it from where we're standing (visible as
+            // "bot keeps shooting mobs while supposedly picking stuff up").
+            // Switch back to "NoTarget" only when we need to fight.
+            EnsureRetargetMode("Never");
+            // ALSO clear the hard target every tick we're in pickup, in case
+            // anything (Maiden pre-scan, manual click, etc.) sets it again.
             if (_targetManager.Target != null)
             {
                 LogAction($"collect-FATE: clearing stale target '{_targetManager.Target.Name.TextValue}' so pickup can run");
@@ -2209,6 +2269,10 @@ public sealed class FateController : IDisposable
             }
             return;
         }
+
+        // Combat path on this FATE → re-enable BossMod's initial auto-pick
+        // so the rotation backend has something to cast on while we fight.
+        EnsureRetargetMode("NoTarget");
 
         // Special case: committed mob just aggro'd while we still want more
         // pulls. Drop the commit so we can pick the next unaggro target.
