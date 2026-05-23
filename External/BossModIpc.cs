@@ -81,15 +81,27 @@ public sealed class BossModIpc
     /// </summary>
     public void SetTargetRange(float rangeYalms)
     {
+        var value = MathF.Round(rangeYalms, 1).ToString("0.0", CultureInfo.InvariantCulture);
+        SetTargetRangeOption(value);
+    }
+
+    /// <summary>
+    /// String form of <see cref="SetTargetRange"/> — accepts any of
+    /// StayCloseToTarget's enum option names. The two we use:
+    ///   "OnHitbox" — donut at hitbox radius ± 1 y (melee / tank).
+    ///   "&lt;float&gt;" e.g. "25" — numeric distance from mob center
+    ///                              + hitbox radius (caster / ranged).
+    /// </summary>
+    public void SetTargetRangeOption(string option)
+    {
         try
         {
-            var value = MathF.Round(rangeYalms, 1).ToString("0.0", CultureInfo.InvariantCulture);
             var ok = _addTransientStrategy.InvokeFunc(PresetName,
-                "BossMod.Autorotation.MiscAI.StayCloseToTarget", "Range", value);
-            if (!ok) _log.Warning($"BossMod SetTargetRange({value}) returned false");
-            else _log.Information($"BossMod target range set to {value}y");
+                "BossMod.Autorotation.MiscAI.StayCloseToTarget", "Range", option);
+            if (!ok) _log.Warning($"BossMod SetTargetRangeOption({option}) returned false");
+            else _log.Information($"BossMod target range option set to {option}");
         }
-        catch (IpcError e) { _log.Warning(e, "BossMod SetTargetRange failed"); }
+        catch (IpcError e) { _log.Warning(e, $"BossMod SetTargetRangeOption({option}) failed"); }
     }
 
     /// <summary>

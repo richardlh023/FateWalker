@@ -73,23 +73,20 @@ public static class JobModuleMap
     };
 
     /// <summary>
-    /// Preferred AI target range (yalms) by job. Tank/Melee = 2.6y (inside the
-    /// hitbox so weaponskills land); everything else = 25y (within standard
-    /// caster/healer cast range, no need to move closer).
-    /// </summary>
-    /// <summary>
-    /// BossMod NormalMovement / StayCloseToTarget keeps the player within
-    /// this many yalms of the locked target.
+    /// BossMod StayCloseToTarget "Range" option value for the given job.
     ///
-    /// Melee weaponskill range is 3 y, so traditionally 2.6 was used to
-    /// "stop just inside hitbox" — but with the mob's own hitbox plus a
-    /// player hitbox the safety margin became too tight, and the smallest
-    /// mob movement made BossMod constantly micro-correct (visible as
-    /// shuffle-stepping). 3.2 y gives ~0.6 y of slack, still landing every
-    /// melee GCD, dramatically smoother movement.
+    /// Melee / tank → "OnHitbox": donut at hitbox radius ± 1 y. Forces the
+    /// bot to walk all the way to the mob's actual hitbox surface so the
+    /// melee combo fires instead of the rotation falling back to ranged
+    /// fillers (Holy Spirit / Confiteor / Tomahawk / etc.) from 6 y away.
+    /// Earlier numeric values (2.6 → 3.2) computed goal radius as
+    /// "value + mob_hitbox", which for large-hitbox mobs (~4 y) gave a
+    /// goal radius of ~7 y — wide enough that the bot considered itself
+    /// "in range" without ever actually closing in.
     ///
-    /// Ranged / caster jobs stay at 25 y — well inside their ability range.
+    /// Ranged / caster → "25" (yalms): stops at 25 y, well inside spell
+    /// range and out of the mob's hitbox.
     /// </summary>
-    public static float GetTargetRange(uint classJobId) =>
-        MeleeOrTankJobs.Contains(classJobId) ? 3.2f : 25f;
+    public static string GetTargetRangeOption(uint classJobId) =>
+        MeleeOrTankJobs.Contains(classJobId) ? "OnHitbox" : "25";
 }

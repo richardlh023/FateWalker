@@ -1659,14 +1659,18 @@ public sealed class FateController : IDisposable
                     "DelayMovement",
                     "None");
 
-                // Override StayCloseToTarget range based on the player's job so
-                // melee jobs walk into hitbox range instead of stalling.
+                // Override StayCloseToTarget range based on the player's job:
+                // melee = OnHitbox (donut on hitbox surface so combo lands);
+                // ranged = 25 y. See JobModuleMap.GetTargetRangeOption for
+                // the rationale behind dropping the old numeric melee range
+                // (it computed goal as "value + hitbox", letting big-hitbox
+                // mobs leave the bot stuck at 6 y throwing ranged fillers).
                 var player = _objectTable.LocalPlayer;
                 if (player != null)
                 {
-                    var range = JobModuleMap.GetTargetRange(player.ClassJob.RowId);
-                    LogAction($"BossMod.SetTargetRange({range}y) for job id={player.ClassJob.RowId}");
-                    _bossmod.SetTargetRange(range);
+                    var opt = JobModuleMap.GetTargetRangeOption(player.ClassJob.RowId);
+                    LogAction($"BossMod.SetTargetRangeOption({opt}) for job id={player.ClassJob.RowId}");
+                    _bossmod.SetTargetRangeOption(opt);
                 }
 
                 if (_config.CombatBackend == Configuration.CombatBackendKind.RSR)
