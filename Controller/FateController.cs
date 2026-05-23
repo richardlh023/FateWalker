@@ -198,6 +198,10 @@ public sealed class FateController : IDisposable
     // Random humanize jump during long walks (Traveling). Rolls a fresh
     // 25–75s interval after each fire so cadence isn't a giveaway.
     private DateTime _nextJumpAt = DateTime.MinValue;
+    // Marker for the last time we issued a stuck-recovery navmesh call. If
+    // a mob attacks mid-recovery we use this to know we should stop our
+    // vnav path so BossMod's NormalMovement can take over for combat.
+    private DateTime _stuckRecoveryIssuedAt = DateTime.MinValue;
     // Movement gate for humanize jump — we only tap jump when actually
     // walking (covered ≥ 5 y in the last 4 s window). Standing-still jumps
     // look more bot-like than the perfectly-still autorun we're trying to
@@ -3676,6 +3680,18 @@ public sealed class FateController : IDisposable
         var player = _objectTable.LocalPlayer;
         if (player == null) return;
 
+        // If combat started during our recent stuck-recovery navmesh kick,
+        // hand control back to BossMod / RSR so they can engage the mob
+        // instead of fighting our vnav path. One-shot.
+        if (_stuckRecoveryIssuedAt != DateTime.MinValue
+            && _condition[ConditionFlag.InCombat]
+            && DateTime.UtcNow - _stuckRecoveryIssuedAt < TimeSpan.FromSeconds(12))
+        {
+            LogAction("watchdog: combat started during recovery — stopping vnav so combat AI takes over");
+            try { _navmesh.Stop(); } catch {}
+            _stuckRecoveryIssuedAt = DateTime.MinValue;
+        }
+
         if (_genericLastPos == Vector3.Zero
             || Vector3.DistanceSquared(_genericLastPos, player.Position) > 4f) // >2y move
         {
@@ -3699,30 +3715,46 @@ public sealed class FateController : IDisposable
         //          fresh plan often picks a route OVER the obstacle.
         //   30 s — full relocate: Lifestream.Teleport to the zone's
         //          primary aetheryte. We've exhausted local recovery.
-        bool canAct = !_config.DryRun
-                   && !_condition[ConditionFlag.Mounted]
-                   && !_condition[ConditionFlag.InFlight]
-                   && !_condition[ConditionFlag.InCombat]
+        // Lightweight gate — only blocks the truly disruptive states (cutscene,
+        // loading screen). Combat / mounted / flying are handled per-tier so
+        // we can still flee-then-teleport when a mob pins us mid-recovery.
+        bool canActLightweight = !_config.DryRun
                    && !_condition[ConditionFlag.OccupiedInCutSceneEvent]
                    && !_condition[ConditionFlag.BetweenAreas]
                    && !_condition[ConditionFlag.BetweenAreas51];
-        if (!canAct) return;
+        if (!canActLightweight) return;
 
         if (stillSec >= 30)
         {
             var zone = TerritoryMap.Lookup(_clientState.TerritoryType);
-            if (zone != null && _lifestream.IsAvailable)
+            if (zone == null || !_lifestream.IsAvailable) return;
+            // Lifestream.Teleport rejects InCombat unconditionally. Flee
+            // 80 y away from the nearest hostile first (same routine the
+            // Repairing flow uses), then the next watchdog tick lands the
+            // teleport when we drop out of combat.
+            if (_condition[ConditionFlag.InCombat])
             {
-                LogAction($"watchdog: stuck {stillSec:F0}s — teleport to {zone.AetheryteName} to relocate");
-                try { _navmesh.Stop(); } catch {}
-                try { _lifestream.Teleport(zone.AetheryteId, 0); } catch {}
-                _genericLastMoveAt = DateTime.UtcNow; // pause escalation; teleport gives a clean slate
+                LogAction($"watchdog: stuck {stillSec:F0}s + in combat — flee before teleport");
+                FleeCombatForRepair();
                 return;
             }
+            LogAction($"watchdog: stuck {stillSec:F0}s — teleport to {zone.AetheryteName} to relocate");
+            try { _navmesh.Stop(); } catch {}
+            try { _lifestream.Teleport(zone.AetheryteId, 0); } catch {}
+            _genericLastMoveAt = DateTime.UtcNow; // pause escalation; teleport gives a clean slate
+            return;
         }
+
+        // Tier 1 & 2 want the player on foot and out of combat — a jump
+        // mid-cast or a re-pathfind during an aggro pull would do more harm
+        // than good. Skip until the heavyweight conditions clear.
+        bool canActHeavy = !_condition[ConditionFlag.Mounted]
+                        && !_condition[ConditionFlag.InFlight]
+                        && !_condition[ConditionFlag.InCombat];
+        if (!canActHeavy) return;
+
         if (stillSec >= 15)
         {
-            // Re-pathfind to current target / FATE waypoint.
             Vector3? dst = _targetManager.Target?.Position
                         ?? (_targetFatePos != Vector3.Zero ? _targetFatePos : (Vector3?)null);
             if (dst.HasValue)
@@ -3730,6 +3762,7 @@ public sealed class FateController : IDisposable
                 LogAction($"watchdog: stuck {stillSec:F0}s — cancel path + re-pathfind to ({dst.Value.X:F0},{dst.Value.Y:F0},{dst.Value.Z:F0})");
                 try { _navmesh.Stop(); } catch {}
                 try { _navmesh.PathfindAndMoveCloseTo(dst.Value, fly: true, range: 3f); } catch {}
+                _stuckRecoveryIssuedAt = DateTime.UtcNow;
                 return;
             }
         }
