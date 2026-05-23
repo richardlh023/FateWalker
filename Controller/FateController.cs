@@ -3685,22 +3685,20 @@ public sealed class FateController : IDisposable
         }
 
         var stillSec = (DateTime.UtcNow - _genericLastMoveAt).TotalSeconds;
-        if (stillSec < 15) return; // grace before any warning
-        if (DateTime.UtcNow - _lastGenericStuckLogAt < TimeSpan.FromSeconds(15)) return;
+        if (stillSec < 5) return; // tight human-reaction grace
+        if (DateTime.UtcNow - _lastGenericStuckLogAt < TimeSpan.FromSeconds(8)) return;
         _lastGenericStuckLogAt = DateTime.UtcNow;
         LogAction($"watchdog: no movement for {stillSec:F0}s in {State} at ({player.Position.X:F0}, {player.Position.Y:F0}, {player.Position.Z:F0})");
 
-        // Progressive stuck-recovery escalation. Each level only fires once
-        // per stuck window — we reset on the next movement (top of method).
-        //   15 s — stuck-jump (cheap, fixes ~80 % of pin-against-geometry)
-        //   30 s — cancel current path + re-pathfind. vnav sometimes locks
-        //          on a path that the player physically can't execute (a
-        //          rock not in the navmesh, an unintended ledge). A fresh
-        //          plan from current position usually picks a different
-        //          route around the obstacle.
-        //   60 s — full relocate: teleport to the zone's primary aetheryte.
-        //          We've exhausted local recovery; better to lose 10 s to a
-        //          loading screen than block forever.
+        // Progressive stuck-recovery escalation, tuned to feel human (a real
+        // player notices and reacts within seconds, not 30+):
+        //    5 s — stuck-jump (cheap try to pop off geometry)
+        //   15 s — cancel current path + re-pathfind with fly=true. vnav
+        //          sometimes locks on a path the player can't physically
+        //          execute (rock not in navmesh, unintended ledge). A
+        //          fresh plan often picks a route OVER the obstacle.
+        //   30 s — full relocate: Lifestream.Teleport to the zone's
+        //          primary aetheryte. We've exhausted local recovery.
         bool canAct = !_config.DryRun
                    && !_condition[ConditionFlag.Mounted]
                    && !_condition[ConditionFlag.InFlight]
@@ -3710,7 +3708,7 @@ public sealed class FateController : IDisposable
                    && !_condition[ConditionFlag.BetweenAreas51];
         if (!canAct) return;
 
-        if (stillSec >= 60)
+        if (stillSec >= 30)
         {
             var zone = TerritoryMap.Lookup(_clientState.TerritoryType);
             if (zone != null && _lifestream.IsAvailable)
@@ -3722,7 +3720,7 @@ public sealed class FateController : IDisposable
                 return;
             }
         }
-        if (stillSec >= 30)
+        if (stillSec >= 15)
         {
             // Re-pathfind to current target / FATE waypoint.
             Vector3? dst = _targetManager.Target?.Position
@@ -3735,7 +3733,7 @@ public sealed class FateController : IDisposable
                 return;
             }
         }
-        // 15s: jump
+        // 5s tier: jump
         try { _action.Jump(); LogAction("watchdog: stuck-jump"); }
         catch (Exception ex) { _log.Warning(ex, "stuck-jump failed"); }
     }
