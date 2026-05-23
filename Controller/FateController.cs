@@ -165,6 +165,12 @@ public sealed class FateController : IDisposable
     // bot dashes off to pull a new one — leaving 3 still-aggro'd mobs
     // behind to leash + regen.
     private bool _killPhaseLatch;
+    // Sustained-aggro-loss timer for the latch. aggro=0 in a single tick
+    // isn't safe to act on — mobs briefly retarget the chocobo and the
+    // aggro list flickers empty for a tick or two. We only release the
+    // latch after 3 s of CONTINUOUS aggro=0, by which point the batch
+    // really is dead.
+    private DateTime _killPhaseAggroLossAt = DateTime.MinValue;
 
     // Throttle for the "no FATE mob in range" diagnostic log.
     private DateTime _lastNoFateMobLogAt = DateTime.MinValue;
@@ -2257,8 +2263,33 @@ public sealed class FateController : IDisposable
         //         batch dead) — otherwise the moment one mob dies the
         //         bot would dash off to grab a new pull and the rest of
         //         the batch would leash + regen on the way back.
-        if (aggro.Count >= _config.MaxAggroCount) _killPhaseLatch = true;
-        if (aggro.Count == 0) _killPhaseLatch = false;
+        if (aggro.Count >= _config.MaxAggroCount)
+        {
+            _killPhaseLatch = true;
+            _killPhaseAggroLossAt = DateTime.MinValue;
+        }
+        if (aggro.Count == 0)
+        {
+            // Only release the latch after 3 s of sustained aggro=0. A
+            // single-tick flicker (mob briefly retargets chocobo etc.)
+            // would otherwise drop the kill-batch latch mid-fight and let
+            // the bot dash off after a fresh pull.
+            if (_killPhaseLatch)
+            {
+                if (_killPhaseAggroLossAt == DateTime.MinValue)
+                    _killPhaseAggroLossAt = DateTime.UtcNow;
+                else if (DateTime.UtcNow - _killPhaseAggroLossAt > TimeSpan.FromSeconds(3))
+                {
+                    _killPhaseLatch = false;
+                    _killPhaseAggroLossAt = DateTime.MinValue;
+                }
+            }
+        }
+        else
+        {
+            // Any aggro at all → forget the loss timer, the batch is alive.
+            _killPhaseAggroLossAt = DateTime.MinValue;
+        }
 
         // On a collect FATE we never *pull* — the goal is items, not kills.
         // We still focus and kill anything that already aggro'd on us
@@ -3557,6 +3588,7 @@ public sealed class FateController : IDisposable
         // only valid within an active Engaging cycle.
         _pullCommitId = 0;
         _killPhaseLatch = false;
+        _killPhaseAggroLossAt = DateTime.MinValue;
 
         // Clear humanize timers — they belong to specific actions, not states.
         _pendingSelectYesnoAt = null;
