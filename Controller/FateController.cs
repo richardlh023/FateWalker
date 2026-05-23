@@ -3707,14 +3707,46 @@ public sealed class FateController : IDisposable
     /// </summary>
     private void GenericStuckWatchdog()
     {
-        if (State == FateBotState.Stopped || State == FateBotState.Paused
-            || State == FateBotState.Recovering || State == FateBotState.Dying)
+        // Skip states where the player is legitimately stationary (cast bar,
+        // loading screen, mount animation, NPC dialog, etc.). Watchdog is
+        // for detecting navmesh-stuck during ACTIVE traversal —
+        //   • Stopped / Paused / PreparingPause — bot idle
+        //   • Teleporting — Lifestream cast (~5 s) + loading screen
+        //   • Repairing / Trading — both include their own teleport hop
+        //   • Mounting — mount roulette animation
+        //   • Interacting — NPC dialog / talk addon
+        //   • Recovering — HP regen wait
+        //   • Dying — wait for raise or click Return
+        if (State == FateBotState.Stopped
+         || State == FateBotState.Paused
+         || State == FateBotState.PreparingPause
+         || State == FateBotState.Teleporting
+         || State == FateBotState.Repairing
+         || State == FateBotState.Trading
+         || State == FateBotState.Mounting
+         || State == FateBotState.Interacting
+         || State == FateBotState.Recovering
+         || State == FateBotState.Dying)
         {
             _genericLastPos = Vector3.Zero;
             return;
         }
         var player = _objectTable.LocalPlayer;
         if (player == null) return;
+
+        // Activity gate: only run the stuck watchdog when the bot is
+        // *expecting* the player to move — vnavmesh has an active path, or
+        // we're in Engaging with a locked target (BossMod NormalMovement
+        // is driving). Standing still in Selecting waiting for the next
+        // FATE to spawn is intentional, not stuck — no need to jump.
+        bool vnavBusy = _navmesh.IsPathRunning || _navmesh.IsPathfindInProgress;
+        bool combatMoving = State == FateBotState.Engaging && _targetManager.Target != null;
+        if (!vnavBusy && !combatMoving)
+        {
+            _genericLastPos = Vector3.Zero;
+            _genericLastMoveAt = DateTime.UtcNow;
+            return;
+        }
 
         // If combat started during our recent stuck-recovery navmesh kick,
         // hand control back to BossMod / RSR so they can engage the mob
