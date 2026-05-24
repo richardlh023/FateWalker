@@ -5,7 +5,7 @@ namespace FateWalker;
 
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 2;
+    public int Version { get; set; } = 3;
 
     public bool LevelSyncAlwaysEnable { get; set; } = true;
 
@@ -126,6 +126,27 @@ public sealed class Configuration : IPluginConfiguration
     /// (Comfywizard / Accomp guides).
     /// </summary>
     public int MinDroughtSeconds { get; set; } = 180;
+
+    /// <summary>
+    /// Force a zone rotation every ~N minutes EVEN IF the current zone still
+    /// has eligible FATEs. Pure anti-detection — a human gets bored of farming
+    /// the same zone for hours and moves. The bot does the same.
+    ///
+    /// Fires only when State == Selecting (clean handoff point — no active
+    /// FATE, no mid-flight teleport, no NPC dialog). All other states will
+    /// naturally cycle through Selecting; the trigger just waits.
+    /// </summary>
+    public bool EnableRandomZoneRotation { get; set; } = false;
+
+    /// <summary>
+    /// Base interval (minutes) between forced random rotations. Each actual
+    /// fire rolls in [base - jitter, base + jitter]. Floor 5 min for safety.
+    /// </summary>
+    public int RandomZoneRotationMinutes { get; set; } = 45;
+
+    /// <summary>± jitter on <see cref="RandomZoneRotationMinutes"/>.
+    /// 15 → between 30 and 60 min each cycle.</summary>
+    public int RandomZoneRotationJitterMinutes { get; set; } = 15;
 
     /// <summary>
     /// In-zone long-range teleport threshold (yalms). When the picked FATE is

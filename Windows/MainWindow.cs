@@ -338,6 +338,46 @@ public sealed class MainWindow : Window, IDisposable
             changed = true;
         }
 
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Text("Random rotation (anti-detection)");
+        var randRot = cfg.EnableRandomZoneRotation;
+        if (ImGui.Checkbox("Force a random zone hop on a timer", ref randRot))
+        {
+            cfg.EnableRandomZoneRotation = randRot;
+            changed = true;
+            // Tell the controller to re-roll its timer immediately so the
+            // toggle takes effect without restarting the bot.
+            _plugin.Controller.NotifyRandomRotateConfigChanged();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("hop even when current zone is productive — \"looks like player got bored\"");
+        if (randRot)
+        {
+            ImGui.Indent(16f);
+            var rrMin = cfg.RandomZoneRotationMinutes;
+            ImGui.SetNextItemWidth(180f);
+            if (ImGui.SliderInt("base interval (min)", ref rrMin, 10, 180))
+            {
+                cfg.RandomZoneRotationMinutes = rrMin;
+                changed = true;
+                _plugin.Controller.NotifyRandomRotateConfigChanged();
+            }
+            var rrJit = cfg.RandomZoneRotationJitterMinutes;
+            ImGui.SetNextItemWidth(180f);
+            if (ImGui.SliderInt("± jitter (min)", ref rrJit, 0, 60))
+            {
+                cfg.RandomZoneRotationJitterMinutes = rrJit;
+                changed = true;
+                _plugin.Controller.NotifyRandomRotateConfigChanged();
+            }
+            int lo = System.Math.Max(5, rrMin - rrJit);
+            int hi = rrMin + rrJit;
+            ImGui.TextDisabled($"Each fire rolls between {lo}–{hi} min. Requires ≥2 zones in the working set. Defers if Twist of Fate buff active.");
+            ImGui.Unindent(16f);
+        }
+        ImGui.Spacing();
+
         var skipMaxed = cfg.SkipMaxedSharedFateZones;
         if (ImGui.Checkbox("Shared FATE Progress (skip zones at max rank)", ref skipMaxed))
         {

@@ -190,7 +190,6 @@ public sealed class FateController : IDisposable
     // path is running.
     private Vector3 _genericLastPos = Vector3.Zero;
     private DateTime _genericLastMoveAt = DateTime.UtcNow;
-    private DateTime _lastGenericStuckLogAt = DateTime.MinValue;
 
     // Dismount stuck recovery — count consecutive failed dismount attempts
     // (Mount flag never clears). When over threshold, re-pathfind to ground-
@@ -322,6 +321,17 @@ public sealed class FateController : IDisposable
             _sessionDisabledFateIds.Add(fateId);
             LogAction($"disabled fate id={fateId} (session, until despawn)");
         }
+    }
+
+    /// <summary>
+    /// Called by the UI when the user toggles the random-rotation feature or
+    /// changes its interval. Re-rolls the next-fire timer so a slider tweak
+    /// takes effect immediately (no need to Stop/Start the bot).
+    /// </summary>
+    public void NotifyRandomRotateConfigChanged()
+    {
+        if (_sessionStartedAt == null) return;
+        RollNextRandomRotate();
     }
 
     public void ToggleManualPick(ushort fateId)
@@ -561,6 +571,7 @@ public sealed class FateController : IDisposable
         _sessionRepairTrips = 0;
         _sessionStartGemCount = Math.Max(0, FateWalker.Data.CurrencyReader.GetBicolorGemstoneCount());
         _sessionCapHoursRolled = RollSessionCapHours();
+        RollNextRandomRotate();
         _sessionLoopRecoveries = 0;
         _loopRecoveryCount = 0;
         _logFingerprints.Clear();
@@ -937,6 +948,42 @@ public sealed class FateController : IDisposable
             }
             Transition(FateBotState.Dying);
             return;
+        }
+
+        // Random zone rotation — anti-detection. Fires every N±jitter min
+        // even when current zone is productive ("looks like player got bored
+        // and moved"). Trigger ordering rationale:
+        //   • Runs AFTER auto-repair / auto-trade / session cap / death
+        //     override — those are higher-priority transactional flows that
+        //     must complete first.
+        //   • Runs ONLY when State == Selecting — guarantees no active
+        //     FATE, no mid-flight teleport, no NPC dialog. Other states
+        //     naturally cycle through Selecting, so deferring is safe and
+        //     never abandons mid-pull / mid-trade / mid-repair.
+        //   • Also deferred while Twist of Fate buff active — the chain
+        //     priority already refuses zone rotation; same logic applies.
+        if (_config.EnableRandomZoneRotation
+            && _sessionStartedAt != null
+            && State == FateBotState.Selecting
+            && DateTime.UtcNow >= _nextRandomRotateAt)
+        {
+            if (_config.EnableTwistOfFateChain && IsTwistOfFateActive())
+            {
+                // Buff first — re-poll in 30s; rotate after chain done.
+                _nextRandomRotateAt = DateTime.UtcNow.AddSeconds(30);
+            }
+            else if (TryForceRandomZoneRotate())
+            {
+                RollNextRandomRotate();
+                return;
+            }
+            else
+            {
+                // Couldn't fire (no Lifestream, no other zones, etc.) —
+                // try again in 2 min. If WorkingSet < 2 the next Roll
+                // will permanently disable until the user adds a zone.
+                _nextRandomRotateAt = DateTime.UtcNow.AddMinutes(2);
+            }
         }
 
         // Deferred SelectYesno auto-confirm (humanize delay) — always runs.
@@ -2203,33 +2250,43 @@ public sealed class FateController : IDisposable
     // Diagnostic — periodic HP log so we can prove the panic check is running
     // even when it returns false.
     private DateTime _lastHpLogAt = DateTime.MinValue;
+    private int _lastHpLogPct = 100;
+    // Watchdog stuck-event de-dup: increments to next tier (5/15/30s) only
+    // once per continuous stuck period. Resets when the player moves >2y.
+    private int _stuckTierLogged;   // 0 = none, 1 = 5s logged, 2 = 15s, 3 = 30s
+
+    // Anti-detection: timer that fires a forced random zone rotation even when
+    // current zone still has FATEs. DateTime.MaxValue = disabled / not yet
+    // rolled. Rolled fresh on Start() and after each fire.
+    private DateTime _nextRandomRotateAt = DateTime.MaxValue;
 
     private bool CheckPanic(IFate fate)
     {
         if (_panicked) return false; // already bailing
         var player = _objectTable.LocalPlayer;
-        if (player == null || player.MaxHp == 0)
-        {
-            // Surface this early-out — if HP=0 reads happen during damage,
-            // we'd silently skip panic and the user would never see it.
-            if (DateTime.UtcNow - _lastHpLogAt > TimeSpan.FromSeconds(5))
-            {
-                _lastHpLogAt = DateTime.UtcNow;
-                LogAction($"panic check: player={(player == null ? "null" : "ok")}, MaxHp={(player?.MaxHp.ToString() ?? "-")} — skipped");
-            }
-            return false;
-        }
+        if (player == null || player.MaxHp == 0) return false;
 
         int hpPct = (int)(100L * player.CurrentHp / player.MaxHp);
 
-        // Periodic diagnostic: every 10s of Engaging, log HP. When below 70%,
-        // log every tick we're not panicking so we can see the descent.
-        bool shouldLog = (hpPct < 70 && DateTime.UtcNow - _lastHpLogAt > TimeSpan.FromSeconds(1))
-                      || (DateTime.UtcNow - _lastHpLogAt > TimeSpan.FromSeconds(10));
-        if (shouldLog)
+        // Diagnostic: only log when HP enters a region of interest. Healthy
+        // ticks (HP > 70%) are silent — they spam the 40-line log ring with
+        // no useful signal. Below 70% we log on first crossing + every 5s of
+        // continued danger so the tester can see HP descending into panic.
+        bool inDanger = hpPct < 70;
+        bool firstDangerCrossing = inDanger && _lastHpLogPct >= 70;
+        bool firstRecovery       = !inDanger && _lastHpLogPct < 70 && _lastHpLogPct > 0;
+        bool periodicDangerHeartbeat = inDanger
+            && DateTime.UtcNow - _lastHpLogAt > TimeSpan.FromSeconds(5);
+        if (firstDangerCrossing || firstRecovery || periodicDangerHeartbeat)
         {
             _lastHpLogAt = DateTime.UtcNow;
-            LogAction($"HP {hpPct}% ({player.CurrentHp}/{player.MaxHp}) — panic threshold {_config.PanicHpPercent}%");
+            _lastHpLogPct = hpPct;
+            var arrow = firstDangerCrossing ? "↓" : firstRecovery ? "↑ recovered" : "";
+            LogAction($"HP {hpPct}% {arrow} (panic threshold {_config.PanicHpPercent}%)");
+        }
+        else
+        {
+            _lastHpLogPct = hpPct;
         }
 
         if (hpPct >= _config.PanicHpPercent) return false;
@@ -2759,6 +2816,7 @@ public sealed class FateController : IDisposable
         {
             _sessionStartedAt = DateTime.UtcNow;
             _sessionCapHoursRolled = RollSessionCapHours(); // fresh roll for the new chunk
+            RollNextRandomRotate();                          // fresh cadence for the new chunk
             LogAction($"resume after pause ({_pauseReason}) — next cap rolled to {_sessionCapHoursRolled:F1}h");
         }
         else
@@ -2783,6 +2841,67 @@ public sealed class FateController : IDisposable
         // _rng.NextDouble() is [0,1); shift to [-1,1) then scale.
         var offset = (_rng.NextDouble() * 2.0 - 1.0) * jitter;
         return Math.Max(0.5, baseH + offset);
+    }
+
+    /// <summary>
+    /// Roll the next random zone-rotation fire time. Disabled (= MaxValue)
+    /// when the feature is off, the base is 0, or the working set has fewer
+    /// than 2 zones (no zone to rotate TO). Each call rolls a fresh interval
+    /// so a watcher can't predict the bot's hop cadence.
+    /// </summary>
+    private void RollNextRandomRotate()
+    {
+        if (!_config.EnableRandomZoneRotation
+            || _config.RandomZoneRotationMinutes <= 0
+            || _config.WorkingSetZones.Count < 2)
+        {
+            _nextRandomRotateAt = DateTime.MaxValue;
+            return;
+        }
+        var baseMin = _config.RandomZoneRotationMinutes;
+        var jitter = Math.Max(0, _config.RandomZoneRotationJitterMinutes);
+        var rolled = jitter > 0 ? _rng.Next(baseMin - jitter, baseMin + jitter + 1) : baseMin;
+        rolled = Math.Max(5, rolled); // safety floor — 5 min minimum cadence
+        _nextRandomRotateAt = DateTime.UtcNow.AddMinutes(rolled);
+        LogAction($"random rotate: next fire in {rolled} min ({_config.RandomZoneRotationMinutes}±{jitter})");
+    }
+
+    /// <summary>
+    /// Force a hop to a different working-set zone right now. Anti-detection
+    /// trigger — invoked from Tick() when the random rotate timer expires
+    /// AND State == Selecting. Picks uniformly from working set minus the
+    /// current zone. Returns true if the bot transitioned to Teleporting;
+    /// false if it couldn't (no Lifestream, no candidates, etc.) and the
+    /// caller should reschedule the trigger.
+    /// </summary>
+    private bool TryForceRandomZoneRotate()
+    {
+        if (!_lifestream.IsAvailable) return false;
+        if (_lifestream.IsBusy) return false;
+        if (_config.WorkingSetZones.Count < 2) return false;
+        var currentTerritory = _clientState.TerritoryType;
+        var candidates = _config.WorkingSetZones
+            .Where(t => t != currentTerritory)
+            .Select(t => TerritoryMap.Lookup(t))
+            .Where(z => z != null)
+            .ToList();
+        if (candidates.Count == 0) return false;
+        var pick = candidates[_rng.Next(candidates.Count)]!;
+
+        LogAction($"random rotate fired — hopping to {pick.ZoneName} (aetheryte {pick.AetheryteId})");
+        _pendingTeleportTerritory = pick.TerritoryTypeId;
+        _pendingTeleportAetheryte = pick.AetheryteId;
+        _teleportFired = false;
+        _lastDepartedFromTerritory = currentTerritory; // matches normal rotate path
+        _droughtStartedAt = null;                       // fresh start in new zone
+        if (!_config.DryRun)
+        {
+            _navmesh.Stop();
+            if (_rsrActivated)     { _rsr.Deactivate();     _rsrActivated = false; }
+            if (_bossmodActivated) { _bossmod.Deactivate(); _bossmodActivated = false; }
+        }
+        Transition(FateBotState.Teleporting);
+        return true;
     }
 
     /// <summary>Roll one session-cap pause duration: base ± Jitter (uniform, minutes).</summary>
@@ -4020,14 +4139,21 @@ public sealed class FateController : IDisposable
         {
             _genericLastPos = player.Position;
             _genericLastMoveAt = DateTime.UtcNow;
+            _stuckTierLogged = 0;   // moved → reset tier so next stuck logs from 5s again
             return;
         }
 
         var stillSec = (DateTime.UtcNow - _genericLastMoveAt).TotalSeconds;
         if (stillSec < 5) return; // tight human-reaction grace
-        if (DateTime.UtcNow - _lastGenericStuckLogAt < TimeSpan.FromSeconds(8)) return;
-        _lastGenericStuckLogAt = DateTime.UtcNow;
-        LogAction($"watchdog: no movement for {stillSec:F0}s in {State} at ({player.Position.X:F0}, {player.Position.Y:F0}, {player.Position.Z:F0})");
+        // Tier-based de-dup: log once when crossing 5s, once at 15s, once at
+        // 30s. Same stuck event no longer re-logs every 8s — the recovery
+        // action it triggers does, which is the signal worth keeping.
+        int tier = stillSec >= 30 ? 3 : stillSec >= 15 ? 2 : 1;
+        if (tier > _stuckTierLogged)
+        {
+            _stuckTierLogged = tier;
+            LogAction($"watchdog: no movement for {stillSec:F0}s in {State} at ({player.Position.X:F0}, {player.Position.Y:F0}, {player.Position.Z:F0})");
+        }
 
         // Progressive stuck-recovery escalation, tuned to feel human (a real
         // player notices and reacts within seconds, not 30+):
