@@ -53,8 +53,14 @@ public sealed class FateController : IDisposable
     // items, "NoTarget" otherwise.
     private string _currentRetargetMode = "";
     private readonly IKeyState _keyState;
+    private readonly IDutyState _dutyState;
+    private readonly YesAlreadyIpc _yesAlready;
     private bool _rsrActivated;
     private bool _yesnoListenerRegistered;
+    private bool? _yesAlreadyPriorState;   // null = we never disabled it; true/false = restore this on Stop
+    private DateTime _lastIdleEmoteAt = DateTime.MinValue;
+    private DateTime _nextIdleEmoteAt = DateTime.MinValue;
+    private bool _pausedAfkSent;
 
     private DateTime _stateEnteredAt = DateTime.UtcNow;
     private DateTime _lastMountAttemptAt = DateTime.MinValue;
@@ -357,7 +363,9 @@ public sealed class FateController : IDisposable
         ActionExecutor action,
         FateSelector selector,
         IDataManager dataManager,
-        IKeyState keyState)
+        IKeyState keyState,
+        IDutyState dutyState,
+        YesAlreadyIpc yesAlready)
     {
         _config = config;
         _log = log;
@@ -381,6 +389,8 @@ public sealed class FateController : IDisposable
         _selector = selector;
         _dataManager = dataManager;
         _keyState = keyState;
+        _dutyState = dutyState;
+        _yesAlready = yesAlready;
 
         _framework.Update += OnFrameworkUpdate;
     }
@@ -554,6 +564,22 @@ public sealed class FateController : IDisposable
         _sessionLoopRecoveries = 0;
         _loopRecoveryCount = 0;
         _logFingerprints.Clear();
+        // Reset session teleport budget counters; these get persisted so a
+        // crash mid-session doesn't lose the running cost (resumed via the
+        // Status tab readout next launch).
+        _config.SessionTeleportCount = 0;
+        _config.SessionTeleportCostGil = 0;
+        // Snapshot YesAlready state and disable while running so its ambient
+        // auto-clicks don't race with our dialog handling.
+        if (_config.DisableYesAlreadyWhileRunning && _yesAlready.IsInstalled)
+        {
+            _yesAlreadyPriorState = _yesAlready.IsEnabled;
+            if (_yesAlreadyPriorState == true)
+            {
+                _yesAlready.SetEnabled(false);
+                LogAction("YesAlready disabled for session (restored on Stop)");
+            }
+        }
         _currentMoveDelay = "None"; // matches BossMod track default; re-applied on activation
         _currentRetargetMode = "";  // force re-apply on first EnforceFateMobTarget
         _lastStatsLogAt = DateTime.UtcNow;
@@ -619,6 +645,15 @@ public sealed class FateController : IDisposable
         }
         try { _navmesh.Stop(); } catch {}
         try { _lifestream.Abort(); } catch {}
+        // Restore YesAlready to whatever the user had set before Start (if we
+        // touched it). _yesAlreadyPriorState == null means we never disabled.
+        if (_yesAlreadyPriorState == true && _yesAlready.IsInstalled)
+        {
+            _yesAlready.SetEnabled(true);
+            LogAction("YesAlready restored");
+        }
+        _yesAlreadyPriorState = null;
+        _pausedAfkSent = false;
         Transition(FateBotState.Stopped);
     }
 
@@ -697,6 +732,22 @@ public sealed class FateController : IDisposable
         catch (Exception ex) { _log.Error(ex, "FateController tick crashed"); }
     }
 
+    /// <summary>
+    /// Prefer Lifestream's real territory (instance-resilient) over Dalamud's
+    /// IClientState.TerritoryType. The latter can be wrong in instanced zones
+    /// (Eureka/Bozja, some open-world post-EW) or briefly during loading.
+    /// Falls back to ClientState when Lifestream isn't available or returns 0.
+    /// </summary>
+    private uint GetCurrentTerritory()
+    {
+        if (_lifestream.IsAvailable)
+        {
+            var t = _lifestream.CurrentTerritory;
+            if (t != 0) return t;
+        }
+        return _clientState.TerritoryType;
+    }
+
     private void Tick()
     {
         if (State == FateBotState.Stopped) return;
@@ -705,6 +756,17 @@ public sealed class FateController : IDisposable
         if (!_clientState.IsLoggedIn) { Stop(); return; }
         if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51]) return;
         if (_condition[ConditionFlag.OccupiedInCutSceneEvent]) return;
+
+        // Duty safety: if Dalamud says we're in an instanced duty (dungeon /
+        // trial / raid) — the bot was never meant for that. Halt rather than
+        // AFK in dungeon (= guaranteed ban-vector).
+        if (_config.AutoStopInDuty && _dutyState.IsDutyStarted)
+        {
+            LogAction("SAFETY STOP — duty active (IDutyState.IsDutyStarted=true)");
+            _chatGui.PrintError("[FateWalker] duty detected — bot stopped to avoid AFK-in-dungeon flag.");
+            Stop();
+            return;
+        }
 
         // Durability sample — run regardless of state, every 5s.
         if (DateTime.UtcNow - _lastDurabilityCheckAt > TimeSpan.FromSeconds(5))
@@ -767,8 +829,21 @@ public sealed class FateController : IDisposable
             && State != FateBotState.Interacting)
         {
             int gems = FateWalker.Data.CurrencyReader.GetBicolorGemstoneCount();
-            if (gems >= _config.TradingTriggerGems)
+            // Effective trigger drops by 100 when a Twist of Fate buff is
+            // active — the next FATE will yield bonus gems, so we want extra
+            // headroom to avoid capping mid-buff.
+            int effectiveTrigger = _config.TradingTriggerGems;
+            if (_config.EnableAdaptiveTradeTrigger && IsTwistOfFateActive())
+                effectiveTrigger = Math.Max(100, effectiveTrigger - 100);
+            // Hard floor: if we're already at or past cap, trade immediately
+            // regardless of trigger (next FATE = 0 reward).
+            bool atCap = gems >= _config.BicolorGemCap;
+            if (gems >= effectiveTrigger || atCap)
             {
+                if (atCap)
+                    LogAction($"trading: gems {gems} at/over cap {_config.BicolorGemCap} — forced trade");
+                else if (effectiveTrigger != _config.TradingTriggerGems)
+                    LogAction($"trading: adaptive trigger {effectiveTrigger} (ToF buff active)");
                 // Build prioritized buy queue: cheapest gem cost first (so
                 // Vouchers drain before high-cost items), skip items already
                 // at their inventory cap.
@@ -969,7 +1044,20 @@ public sealed class FateController : IDisposable
                             && !MatchesBlacklistPattern(c.Fate.Name.TextValue)
                             && !_sessionDisabledFateIds.Contains(c.Fate.FateId))
                 .ToList();
-            chosen = picks.FirstOrDefault();
+            // Twist of Fate chain: ignore Bonus preference, pick the closest
+            // valid FATE in the current zone — minimum travel time = maximum
+            // chance to consume the buff before it expires.
+            if (_config.EnableTwistOfFateChain && IsTwistOfFateActive() && picks.Count > 1)
+            {
+                chosen = picks
+                    .OrderBy(c => c.DistanceToPlayer)
+                    .First();
+                LogAction($"ToF chain: picking closest ({chosen.DistanceToPlayer:F0}y) over bonus priority");
+            }
+            else
+            {
+                chosen = picks.FirstOrDefault();
+            }
         }
 
         if (chosen == null)
@@ -1000,7 +1088,10 @@ public sealed class FateController : IDisposable
         // Humanize: pause in Selecting for ThinkBeforePick seconds before
         // committing. Simulates a player glancing at the FATE list before
         // engaging instead of instant decision.
-        if (DateTime.UtcNow - _stateEnteredAt < _humanizeDelay)
+        // Twist of Fate chain: bypass the humanize delay so we don't waste
+        // the buff window (~30s remaining is typical after Forlorn kill).
+        bool chainSkipHumanize = _config.EnableTwistOfFateChain && IsTwistOfFateActive();
+        if (!chainSkipHumanize && DateTime.UtcNow - _stateEnteredAt < _humanizeDelay)
             return;
 
         _targetFateId = chosen.Fate.FateId;
@@ -1034,16 +1125,31 @@ public sealed class FateController : IDisposable
         }
 
         // Long-range in-zone teleport: when the FATE is far enough that a
-        // teleport + short fly beats a direct fly (default threshold 1500 y),
+        // teleport + short fly beats a direct fly (default threshold 1800 y),
         // hop to the zone's primary aetheryte first. After arrival we re-enter
         // Selecting and the FATE is picked again at much shorter range.
+        //
+        // Gates: master toggle off, gil below floor, or Twist of Fate buff
+        // active (chain mode forbids leaving the zone) all force a fly.
         var zone = TerritoryMap.Lookup(_clientState.TerritoryType);
+        bool tofChainActive = _config.EnableTwistOfFateChain && IsTwistOfFateActive();
+        bool gilOk = !_config.EnableLongRangeTeleport
+            ? false
+            : (_config.MinGilReserve <= 0
+                || FateWalker.Data.CurrencyReader.GetGil() >= _config.MinGilReserve);
         if (zone != null
+            && _config.EnableLongRangeTeleport
             && _lifestream.IsAvailable
+            && !_lifestream.IsBusy
+            && gilOk
+            && !tofChainActive
             && chosen.DistanceToPlayer > _config.LongRangeTeleportYalms
             && !_condition[ConditionFlag.InCombat])
         {
-            LogAction($"long-range hop: FATE {chosen.DistanceToPlayer:F0}y > {_config.LongRangeTeleportYalms}y — teleport to {zone.AetheryteName} (aetheryte {zone.AetheryteId}) first");
+            _config.SessionTeleportCount++;
+            _config.SessionTeleportCostGil += EstimateInZoneTeleportCostGil();
+            _saveConfig?.Invoke();
+            LogAction($"long-range hop: FATE {chosen.DistanceToPlayer:F0}y > {_config.LongRangeTeleportYalms}y — teleport to {zone.AetheryteName} (aetheryte {zone.AetheryteId}) · session #{_config.SessionTeleportCount}, est cost {_config.SessionTeleportCostGil}g");
             _pendingTeleportTerritory = _clientState.TerritoryType;
             _pendingTeleportAetheryte = zone.AetheryteId;
             _teleportFired = false;
@@ -1057,6 +1163,13 @@ public sealed class FateController : IDisposable
             // Teleporting state's own retry loop will handle it if dismount stalls.
             Transition(FateBotState.Teleporting);
             return;
+        }
+        else if (zone != null
+            && chosen.DistanceToPlayer > _config.LongRangeTeleportYalms
+            && (!_config.EnableLongRangeTeleport || !gilOk || tofChainActive))
+        {
+            string why = !_config.EnableLongRangeTeleport ? "disabled" : tofChainActive ? "ToF chain" : "low gil";
+            LogAction($"long-range eligible ({chosen.DistanceToPlayer:F0}y) but skipped — {why}");
         }
 
         if (_condition[ConditionFlag.Mounted])
@@ -1101,6 +1214,19 @@ public sealed class FateController : IDisposable
         // never sit on a drought timer in a city.
         bool inFateTerritory = TerritoryMap.Lookup(currentTerritory) != null;
         if (!inFateTerritory) outsideWorkingSet = true;
+
+        // Twist of Fate chain: refuse to rotate while the buff is active —
+        // leaving the zone drops the buff (it's zone-scoped) and wastes the
+        // gem multiplier. Wait it out in current zone instead.
+        if (_config.EnableTwistOfFateChain && IsTwistOfFateActive() && inFateTerritory)
+        {
+            if (DateTime.UtcNow - _lastDroughtLogAt > TimeSpan.FromSeconds(10))
+            {
+                _lastDroughtLogAt = DateTime.UtcNow;
+                LogAction("rotate: refused — Twist of Fate buff active (chain priority)");
+            }
+            return false;
+        }
         // Maxed zones are equivalent to "outside working set" for rotation
         // purposes — we want OUT immediately, no drought wait.
         var ranks = _config.SkipMaxedSharedFateZones
@@ -1231,9 +1357,10 @@ public sealed class FateController : IDisposable
         // otherwise an in-zone teleport (current territory == pending)
         // exits this state immediately without ever calling Lifestream.
         // BetweenAreas (loading) must have cleared too so we don't drop out
-        // mid-loading-screen.
+        // mid-loading-screen. Use Lifestream's GetRealTerritoryType — it's
+        // instance-resilient where ClientState.TerritoryType can wobble.
         if (_teleportFired
-            && _clientState.TerritoryType == _pendingTeleportTerritory
+            && GetCurrentTerritory() == _pendingTeleportTerritory
             && !_condition[ConditionFlag.BetweenAreas]
             && !_condition[ConditionFlag.BetweenAreas51])
         {
@@ -1273,10 +1400,16 @@ public sealed class FateController : IDisposable
                 Transition(FateBotState.Selecting);
                 return;
             }
-            // Belt-and-suspenders: close any leftover shop/vendor addon
-            // before firing. An open modal counts as "player occupied" to
-            // the game and Lifestream rejects every teleport attempt until
-            // we close it.
+            // Don't stomp Lifestream's own queue — if it's busy from a prior
+            // operation (aethernet hop, vnav follow-path), wait one more cycle.
+            if (_lifestream.IsBusy)
+            {
+                LogAction("teleport: Lifestream busy, waiting one cycle");
+                return;
+            }
+            // Belt-and-suspenders: close any leftover shop/vendor/dialog addon
+            // before firing. An open modal counts as "player occupied" to the
+            // game and Lifestream rejects every teleport attempt until closed.
             TryCloseShopExchangeCurrency();
             var ok = _lifestream.Teleport(_pendingTeleportAetheryte, 0);
             LogAction($"Lifestream.Teleport(aetheryte={_pendingTeleportAetheryte}) → {ok}");
@@ -1845,12 +1978,49 @@ public sealed class FateController : IDisposable
         }
 
         if (landAt == null) return;
-        try { _navmesh.PathfindAndMoveCloseTo(landAt.Value, fly: true, range: 3f); }
+        // Snap to nearest reachable mesh point — fixes Forlorn-on-cliff and
+        // mob-on-unreachable-island edge cases where vnav would otherwise
+        // path-fail. Halts on null → falls back to the raw entity position.
+        var snapped = _navmesh.NearestPointReachable(landAt.Value, 8f, 8f);
+        var dest = snapped ?? landAt.Value;
+        try { _navmesh.PathfindAndMoveCloseTo(dest, fly: true, range: 3f); }
         catch (Exception ex) { _log.Warning(ex, "refine landing pathfind failed"); }
         _landingRefined = true;
-        _refinedLandingPos = landAt;
-        LogAction($"refine landing: heading to {label} at ({landAt.Value.X:F0},{landAt.Value.Y:F0},{landAt.Value.Z:F0})");
+        _refinedLandingPos = dest;
+        var snapNote = snapped.HasValue ? " (snapped)" : "";
+        LogAction($"refine landing: heading to {label} at ({dest.X:F0},{dest.Y:F0},{dest.Z:F0}){snapNote}");
     }
+
+    /// <summary>
+    /// True iff the player currently has the "Twist of Fate" status. The buff
+    /// is applied after killing Forlorn Maiden / The Forlorn rare and adds
+    /// +50% / +300% gem reward on the NEXT FATE in the same zone. While
+    /// active the bot should chain aggressively (skip humanize delays, refuse
+    /// zone rotation) to cash in.
+    /// </summary>
+    private bool IsTwistOfFateActive()
+    {
+        var p = _objectTable.LocalPlayer;
+        if (p == null) return false;
+        var statusId = _config.TwistOfFateStatusId;
+        if (statusId == 0) return false;
+        foreach (var s in p.StatusList)
+        {
+            if (s == null) continue;
+            if (s.StatusId == statusId && s.RemainingTime > 0.5f)
+                return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Rough estimate for the gil cost of a single in-zone aetheryte teleport
+    /// (Lifestream picks the nearest aethernet for the player's current
+    /// position). Used only for the session cost tracker — the game's actual
+    /// invoice is read off the inventory but only after the cast. We log a
+    /// conservative 200 g estimate per hop so the UI shows worst-case spend.
+    /// </summary>
+    private int EstimateInZoneTeleportCostGil() => 200;
 
     /// <summary>
     /// "Lazy dodge" humanize — when HP is comfortable (≥ 90 %), tell BossMod
@@ -2011,8 +2181,16 @@ public sealed class FateController : IDisposable
         // Same-level but far away → ground walk. Dismount handler will land
         // us when navmesh stops near the mob.
         if (_condition[ConditionFlag.Mounted]) return; // dismount handler in charge
+        // Sprint covers ~10-30y of the walk; cheap to fire and the cooldown
+        // (60s) is harmless if we don't use the speed boost. UseSprint returns
+        // false on cooldown so no spam.
+        if (_action.UseSprint()) LogAction("Engaging: Sprint fired for ground walk");
         LogAction($"Engaging: stranded ({dist:F1}y from target, OOC) — kick vnavmesh ground-walk to {target.Name.TextValue}");
-        _navmesh.PathfindAndMoveCloseTo(target.Position, fly: false, range: 3f);
+        // Snap target to a reachable mesh point — guards against the mob
+        // standing on a small ledge/pile that vnav can't path directly to.
+        var snapped = _navmesh.NearestPointReachable(target.Position, 6f, 6f);
+        var dest = snapped ?? target.Position;
+        _navmesh.PathfindAndMoveCloseTo(dest, fly: false, range: 3f);
     }
 
     /// <summary>
@@ -2515,10 +2693,12 @@ public sealed class FateController : IDisposable
             // Skip teleport if we're already very close to the aetheryte
             // (Lifestream.GetActiveAetheryte != 0 means we're standing on it).
             if (DateTime.UtcNow - _lastPreparePauseTpAt < TimeSpan.FromSeconds(5)) return;
+            if (_lifestream.IsBusy) return;
             _lastPreparePauseTpAt = DateTime.UtcNow;
             var info = TerritoryMap.Lookup(_clientState.TerritoryType);
             if (info != null && info.AetheryteId != 0)
             {
+                TryCloseShopExchangeCurrency();
                 var ok = _lifestream.Teleport(info.AetheryteId, 0);
                 LogAction($"PreparingPause: Lifestream.Teleport(aetheryte={info.AetheryteId}, {info.ZoneName}) → {ok}");
                 if (ok) _preparePauseTeleportFired = true;
@@ -2548,9 +2728,33 @@ public sealed class FateController : IDisposable
 
     private void TickPaused()
     {
+        // Idle humanize: send /afk once on entry, then random /stretch or /sit
+        // every 4-9 min while paused. A bot standing motionless for 30 min in
+        // an aetheryte plaza is a strong report signal; a player typing /afk
+        // and occasionally emoting is invisible.
+        if (_config.EnablePausedIdleBehavior && !_config.DryRun)
+        {
+            if (!_pausedAfkSent)
+            {
+                _pausedAfkSent = true;
+                _action.ExecuteChatCommand("/afk");
+                LogAction("Paused: sent /afk");
+                _nextIdleEmoteAt = DateTime.UtcNow.AddMinutes(_rng.Next(4, 10));
+            }
+            else if (DateTime.UtcNow >= _nextIdleEmoteAt)
+            {
+                var pool = new[] { "/stretch", "/sit", "/lookout", "/yawn" };
+                var pick = pool[_rng.Next(pool.Length)];
+                _action.ExecuteChatCommand(pick);
+                LogAction($"Paused: idle emote {pick}");
+                _nextIdleEmoteAt = DateTime.UtcNow.AddMinutes(_rng.Next(4, 10));
+            }
+        }
+
         if (DateTime.UtcNow < _pauseEndsAt) return;
 
         // Timer elapsed — resume.
+        _pausedAfkSent = false;
         if (_pauseResetSessionTimer)
         {
             _sessionStartedAt = DateTime.UtcNow;
@@ -2885,17 +3089,33 @@ public sealed class FateController : IDisposable
     /// </summary>
     private unsafe void TryCloseShopExchangeCurrency()
     {
+        // Close every modal that blocks Lifestream.Teleport. The game flags
+        // the player as "occupied" while any of these are visible, so the cast
+        // is silently rejected. Hitting them all defensively before the
+        // teleport call eliminates an entire class of "teleport rejected loop"
+        // bugs (Talk, SelectIconString, vendor menus, Repair addon, etc).
+        TryCloseAddon("ShopExchangeCurrency");
+        TryCloseAddon("Shop");
+        TryCloseAddon("SelectIconString");
+        TryCloseAddon("SelectString");
+        TryCloseAddon("Talk");
+        TryCloseAddon("Repair");
+        TryCloseAddon("SelectYesno");
+    }
+
+    private unsafe void TryCloseAddon(string name)
+    {
         try
         {
-            var ptr = _gameGui.GetAddonByName("ShopExchangeCurrency");
+            var ptr = _gameGui.GetAddonByName(name);
             var addon = (AtkUnitBase*)ptr.Address;
             if (addon != null && addon->IsVisible)
             {
                 addon->FireCallbackInt(-1);
-                LogAction("trading: shop addon still visible — force-close");
+                LogAction($"force-close addon '{name}' before teleport");
             }
         }
-        catch (Exception ex) { _log.Warning(ex, "TryCloseShopExchangeCurrency failed"); }
+        catch (Exception ex) { _log.Warning(ex, $"TryCloseAddon('{name}') failed"); }
     }
 
     /// <summary>

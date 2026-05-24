@@ -252,6 +252,12 @@ public sealed class MainWindow : Window, IDisposable
     private void DrawLogBlock()
     {
         ImGui.Text("Controller log (last 40 events):");
+        ImGui.SameLine();
+        if (ImGui.SmallButton("Copy to clipboard"))
+        {
+            var text = string.Join("\n", _plugin.Controller.RecentLog);
+            ImGui.SetClipboardText(text);
+        }
         if (ImGui.BeginChild("log", new Vector2(0, 160), true))
         {
             foreach (var line in _plugin.Controller.RecentLog)
@@ -300,7 +306,16 @@ public sealed class MainWindow : Window, IDisposable
             cfg.FateTimeRemainingMinSec = minTime;
             changed = true;
         }
-        ImGui.TextDisabled("Skip FATEs about to expire. Bonus FATEs ignore this cap.");
+        ImGui.TextDisabled("Base threshold; actual cutoff scales with distance (+1s per ~20y). Bonus FATEs ignore this entirely.");
+
+        ImGui.Spacing();
+        var prioBonus = cfg.PrioritizeBonusFates;
+        if (ImGui.Checkbox("Prioritize Bonus FATEs", ref prioBonus))
+        {
+            cfg.PrioritizeBonusFates = prioBonus;
+            changed = true;
+        }
+        ImGui.TextDisabled("When off, picks strictly by distance. When on (default), bonus FATEs win ties.");
 
         if (changed) _plugin.SaveConfig();
     }
@@ -718,6 +733,97 @@ public sealed class MainWindow : Window, IDisposable
             _plugin.SaveConfig();
         }
         ImGui.TextDisabled("Wait this long for a raise before clicking Return-to-home. Bot then teleports back to the FATE zone if it's in the working set.");
+
+        ImGui.Separator();
+        ImGui.Text("Long-range teleport (in-zone aetheryte hop)");
+        var enableLR = cfg.EnableLongRangeTeleport;
+        if (ImGui.Checkbox("Enable long-range teleport", ref enableLR))
+        {
+            cfg.EnableLongRangeTeleport = enableLR;
+            _plugin.SaveConfig();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("hop to primary aetheryte when picked FATE is very far");
+        if (enableLR)
+        {
+            ImGui.Indent(16f);
+            var lr = cfg.LongRangeTeleportYalms;
+            ImGui.SetNextItemWidth(220f);
+            if (ImGui.SliderInt("threshold (yalms)", ref lr, 500, 3000))
+            {
+                cfg.LongRangeTeleportYalms = lr;
+                _plugin.SaveConfig();
+            }
+            ImGui.TextDisabled("recommended 1800. Below ~800y the teleport saves no time. See docs/TELEPORT_BUDGET.md.");
+
+            var floor = cfg.MinGilReserve;
+            ImGui.SetNextItemWidth(220f);
+            if (ImGui.InputInt("min gil reserve", ref floor, 1000, 5000))
+            {
+                cfg.MinGilReserve = System.Math.Max(0, floor);
+                _plugin.SaveConfig();
+            }
+            ImGui.TextDisabled("Bot will fly (not teleport) if your gil drops below this. 0 = no floor.");
+            ImGui.Unindent(16f);
+        }
+        var gilNow = CurrencyReader.GetGil();
+        ImGui.TextDisabled(
+            gilNow >= 0
+                ? $"Session: {cfg.SessionTeleportCount} teleports · est cost {cfg.SessionTeleportCostGil}g · current gil {gilNow:N0}"
+                : $"Session: {cfg.SessionTeleportCount} teleports · est cost {cfg.SessionTeleportCostGil}g");
+        if (ImGui.SmallButton("reset session teleport stats"))
+        {
+            cfg.SessionTeleportCount = 0;
+            cfg.SessionTeleportCostGil = 0;
+            _plugin.SaveConfig();
+        }
+
+        ImGui.Separator();
+        ImGui.Text("Integrations / idle");
+        var yaToggle = cfg.DisableYesAlreadyWhileRunning;
+        if (ImGui.Checkbox("Disable YesAlready while bot is running", ref yaToggle))
+        {
+            cfg.DisableYesAlreadyWhileRunning = yaToggle;
+            _plugin.SaveConfig();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("prevents ambient auto-Yes from racing our dialog handling");
+
+        var stopInDuty = cfg.AutoStopInDuty;
+        if (ImGui.Checkbox("Auto-stop on duty detect", ref stopInDuty))
+        {
+            cfg.AutoStopInDuty = stopInDuty;
+            _plugin.SaveConfig();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("safe if you get pulled into a dungeon/trial mid-farm");
+
+        var idle = cfg.EnablePausedIdleBehavior;
+        if (ImGui.Checkbox("Idle /afk + emotes during Paused", ref idle))
+        {
+            cfg.EnablePausedIdleBehavior = idle;
+            _plugin.SaveConfig();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("masks 30-min statue-pose during macro break");
+
+        var tof = cfg.EnableTwistOfFateChain;
+        if (ImGui.Checkbox("Twist of Fate chain priority", ref tof))
+        {
+            cfg.EnableTwistOfFateChain = tof;
+            _plugin.SaveConfig();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("after Forlorn kill, chain nearest FATE in zone — don't rotate or wait");
+
+        var adapt = cfg.EnableAdaptiveTradeTrigger;
+        if (ImGui.Checkbox("Adaptive trade trigger under ToF buff", ref adapt))
+        {
+            cfg.EnableAdaptiveTradeTrigger = adapt;
+            _plugin.SaveConfig();
+        }
+        ImGui.SameLine();
+        ImGui.TextDisabled("lowers gem trade trigger by 100 while buff active (avoid cap)");
     }
 
     // ─────────────────────────────── Trading tab ─────────────────────────

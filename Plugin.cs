@@ -26,6 +26,7 @@ public sealed class Plugin : IDalamudPlugin
     public LifestreamIpc Lifestream { get; }
     public TextAdvanceIpc TextAdvance { get; }
     public RsrIpc Rsr { get; }
+    public YesAlreadyIpc YesAlready { get; }
     public FateController Controller => _controller;
 
     public Plugin(
@@ -42,7 +43,8 @@ public sealed class Plugin : IDalamudPlugin
         IAddonLifecycle addonLifecycle,
         IGameGui gameGui,
         IDataManager dataManager,
-        IKeyState keyState)
+        IKeyState keyState,
+        IDutyState dutyState)
     {
         _pluginInterface = pluginInterface;
         _commandManager = commandManager;
@@ -55,13 +57,14 @@ public sealed class Plugin : IDalamudPlugin
         Lifestream  = new LifestreamIpc(pluginInterface, log);
         TextAdvance = new TextAdvanceIpc(pluginInterface, log);
         Rsr         = new RsrIpc(pluginInterface, log);
+        YesAlready  = new YesAlreadyIpc(pluginInterface, log);
 
         var selector = new FateSelector(Config);
         var action = new ActionExecutor(log);
         var fileLogger = new SessionFileLogger(pluginInterface);
         _controller = new FateController(
             Config, log, framework, clientState, condition,
-            objectTable, fateTable, targetManager, Navmesh, BossMod, Rsr, Lifestream, TextAdvance, addonLifecycle, gameGui, chat, fileLogger, action, selector, dataManager, keyState);
+            objectTable, fateTable, targetManager, Navmesh, BossMod, Rsr, Lifestream, TextAdvance, addonLifecycle, gameGui, chat, fileLogger, action, selector, dataManager, keyState, dutyState, YesAlready);
         _controller.SetSaveConfigCallback(SaveConfig);
 
         _mainWindow = new MainWindow(this, fateTable, clientState, objectTable);

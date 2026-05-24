@@ -20,6 +20,8 @@ public sealed class NavmeshIpc
     private readonly ICallGateSubscriber<Vector3, bool, bool> _simpleMoveTo;
     private readonly ICallGateSubscriber<Vector3, bool, float, bool> _simpleMoveCloseTo;
     private readonly ICallGateSubscriber<Vector3, bool, CancellationToken, Task<List<Vector3>>> _pathfindCancelable;
+    private readonly ICallGateSubscriber<Vector3, float, float, Vector3?> _nearestPointReachable;
+    private readonly ICallGateSubscriber<Vector3, bool, float, Vector3?> _pointOnFloor;
 
     public NavmeshIpc(IDalamudPluginInterface pi, IPluginLog log)
     {
@@ -31,6 +33,8 @@ public sealed class NavmeshIpc
         _simpleMoveTo        = pi.GetIpcSubscriber<Vector3, bool, bool>("vnavmesh.SimpleMove.PathfindAndMoveTo");
         _simpleMoveCloseTo   = pi.GetIpcSubscriber<Vector3, bool, float, bool>("vnavmesh.SimpleMove.PathfindAndMoveCloseTo");
         _pathfindCancelable  = pi.GetIpcSubscriber<Vector3, bool, CancellationToken, Task<List<Vector3>>>("vnavmesh.Nav.PathfindCancelable");
+        _nearestPointReachable = pi.GetIpcSubscriber<Vector3, float, float, Vector3?>("vnavmesh.Query.Mesh.NearestPointReachable");
+        _pointOnFloor        = pi.GetIpcSubscriber<Vector3, bool, float, Vector3?>("vnavmesh.Query.Mesh.PointOnFloor");
     }
 
     public bool IsAvailable
@@ -71,5 +75,27 @@ public sealed class NavmeshIpc
         if (!IsReady) return false;
         try { return _simpleMoveCloseTo.InvokeFunc(destination, fly, range); }
         catch (IpcError e) { _log.Warning(e, "vnavmesh PathfindAndMoveCloseTo failed"); return false; }
+    }
+
+    /// <summary>
+    /// Snap a target position to the nearest mesh point that's actually
+    /// reachable from the player's current location (not just on the mesh —
+    /// also connected). Returns null if no reachable point is within the
+    /// search box. Use to refine landing spots when a FATE mob is on a
+    /// cliff/unreachable island so vnav doesn't path-fail.
+    /// </summary>
+    public Vector3? NearestPointReachable(Vector3 target, float halfExtentXZ = 5f, float halfExtentY = 5f)
+    {
+        if (!IsReady) return null;
+        try { return _nearestPointReachable.InvokeFunc(target, halfExtentXZ, halfExtentY); }
+        catch (IpcError e) { _log.Warning(e, "vnavmesh NearestPointReachable failed"); return null; }
+    }
+
+    /// <summary>Snap a position to the floor (drops Y to a walkable surface).</summary>
+    public Vector3? PointOnFloor(Vector3 target, bool allowUnlandable = false, float halfExtentXZ = 5f)
+    {
+        if (!IsReady) return null;
+        try { return _pointOnFloor.InvokeFunc(target, allowUnlandable, halfExtentXZ); }
+        catch (IpcError e) { _log.Warning(e, "vnavmesh PointOnFloor failed"); return null; }
     }
 }

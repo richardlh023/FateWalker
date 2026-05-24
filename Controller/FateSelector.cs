@@ -80,16 +80,19 @@ public sealed class FateSelector
         }
         if (catalogChanged) _configChangedFlag = true;
 
-        return materialised
+        var prioritizeBonus = _config.PrioritizeBonusFates;
+        var query = materialised
             .Select(f =>
             {
                 var dist = Vector3.Distance(f.Position, playerPosition);
-                var reason = RejectReason(f, zoneAllowed, playerLevel, zoneRejectOverride);
+                var reason = RejectReason(f, zoneAllowed, playerLevel, zoneRejectOverride, dist);
                 return new FateCandidate(f, dist, reason == null, reason);
             })
-            .OrderByDescending(c => c.PassesFilter)
-            .ThenByDescending(c => c.Fate.HasBonus)
-            .ThenBy(c => c.DistanceToPlayer)
+            .OrderByDescending(c => c.PassesFilter);
+
+        return (prioritizeBonus
+                ? query.ThenByDescending(c => c.Fate.HasBonus).ThenBy(c => c.DistanceToPlayer)
+                : query.ThenBy(c => c.DistanceToPlayer))
             .ToList();
     }
 
@@ -129,7 +132,7 @@ public sealed class FateSelector
         };
     }
 
-    private string? RejectReason(IFate fate, bool zoneAllowed, short playerLevel, string? zoneRejectOverride = null)
+    private string? RejectReason(IFate fate, bool zoneAllowed, short playerLevel, string? zoneRejectOverride, float distanceToPlayer)
     {
         if (!zoneAllowed)                                          return zoneRejectOverride ?? "zone disabled";
 
@@ -141,12 +144,21 @@ public sealed class FateSelector
         if (!isRunning && !isStartable)                            return $"state={fate.State}";
 
         if (fate.Level > playerLevel)                              return $"too high (lv{fate.Level})";
-        if (fate.Level < playerLevel + _config.MinLevelDelta)      return $"too low (lv{fate.Level})";
+        // Bonus FATEs are rare and bypass MinLevelDelta — even a low-level bonus
+        // FATE is worth taking because the 100% gem multiplier compensates.
+        if (!fate.HasBonus && fate.Level < playerLevel + _config.MinLevelDelta)
+            return $"too low (lv{fate.Level})";
         if (_config.BlacklistedFateIds.Contains(fate.FateId))      return "blacklisted";
-        // Bonus FATEs bypass the time-left filter — they're rare, grab even if almost over.
-        // Startable Preparing FATEs also bypass it (the timer starts after interaction).
-        if (!fate.HasBonus && isRunning && fate.TimeRemaining < _config.FateTimeRemainingMinSec)
-            return $"<{_config.FateTimeRemainingMinSec}s left";
+        // Time-left filter: bonus + startable Preparing FATEs bypass entirely.
+        // Otherwise threshold scales with distance — at flying ~20 y/s the bot
+        // needs roughly dist/20 seconds to reach the FATE, so a 1500y FATE with
+        // 60s left would be a wasted trip. base + dist/20 leaves a buffer.
+        if (!fate.HasBonus && isRunning)
+        {
+            var dynamicMin = _config.FateTimeRemainingMinSec + (int)(distanceToPlayer / 20f);
+            if (fate.TimeRemaining < dynamicMin)
+                return $"<{dynamicMin}s left (dist {distanceToPlayer:F0}y)";
+        }
         return null;
     }
 }

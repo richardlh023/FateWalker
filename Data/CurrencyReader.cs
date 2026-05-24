@@ -21,4 +21,19 @@ public static class CurrencyReader
         if (inv == null) return -1;
         return inv->GetInventoryItemCount(BicolorGemstoneItemId);
     }
+
+    /// <summary>
+    /// Gil item ID (FFXIV Item sheet row).
+    /// </summary>
+    public const uint GilItemId = 1;
+
+    /// <summary>
+    /// Player's gil. Returns -1 if InventoryManager is not yet available.
+    /// </summary>
+    public static unsafe int GetGil()
+    {
+        var inv = InventoryManager.Instance();
+        if (inv == null) return -1;
+        return inv->GetInventoryItemCount(GilItemId);
+    }
 }

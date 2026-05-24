@@ -2,6 +2,8 @@ using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Control;
+using FFXIVClientStructs.FFXIV.Client.System.String;
+using FFXIVClientStructs.FFXIV.Client.UI;
 using CSGameObject = FFXIVClientStructs.FFXIV.Client.Game.Object.GameObject;
 
 namespace FateWalker.Controller;
@@ -106,5 +108,28 @@ public sealed unsafe class ActionExecutor
         var go = (CSGameObject*)(void*)obj.Address;
         if (go == null) return false;
         return ts->InteractWithObject(go) != 0;
+    }
+
+    /// <summary>
+    /// Run a chat command (slash command). Used for /afk, emotes, /sit. Same
+    /// path the game uses when the player types in chat. Uses UIModule's
+    /// ProcessChatBoxEntry — matches ECommons' Chat.ExecuteCommand pattern.
+    /// </summary>
+    public void ExecuteChatCommand(string command)
+    {
+        if (string.IsNullOrWhiteSpace(command)) return;
+        var ui = UIModule.Instance();
+        if (ui == null) { _log.Warning("UIModule null — chat command dropped"); return; }
+        Utf8String* msg = null;
+        try
+        {
+            msg = Utf8String.FromString(command);
+            ui->ProcessChatBoxEntry(msg);
+        }
+        catch (System.Exception ex) { _log.Warning(ex, $"ExecuteChatCommand('{command}') failed"); }
+        finally
+        {
+            if (msg != null) msg->Dtor(true);
+        }
     }
 }

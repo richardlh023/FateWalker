@@ -132,12 +132,35 @@ public sealed class Configuration : IPluginConfiguration
     /// farther than this, the bot teleports to the zone's primary aetheryte
     /// first and flies the rest, instead of flying the full distance.
     ///
-    /// Math: flying ≈ 20 y/s. Teleport overhead (cast + loading) ≈ 12 s, so
-    /// teleport saves time once it cuts > 240 y of flying. 1500 y is a safe
-    /// default — by then teleport is faster by a comfortable margin even if
-    /// the aetheryte sits halfway between player and FATE.
+    /// Math: flying ≈ 20 y/s. Teleport overhead (cast + loading) ≈ 15 s, so
+    /// teleport breaks even once it cuts > 300 y of flying. 1800 y is a safe
+    /// default — net-positive on every trigger, ~3-4 teleports per 4hr session
+    /// at ~200 gil each = ~800 gil/session. See docs/TELEPORT_BUDGET.md.
     /// </summary>
-    public int LongRangeTeleportYalms { get; set; } = 1500;
+    public int LongRangeTeleportYalms { get; set; } = 1800;
+
+    /// <summary>
+    /// Master toggle for long-range teleport. When false, the bot ALWAYS flies
+    /// to FATEs in the same zone — predictable gil cost (zero) at the price of
+    /// slower throughput on big ShB/EW zones.
+    /// </summary>
+    public bool EnableLongRangeTeleport { get; set; } = true;
+
+    /// <summary>
+    /// Minimum gil reserve to maintain. If the player's gil drops below this,
+    /// long-range teleport is auto-disabled (the bot will fly instead) until
+    /// gil recovers from trade-ins. Protects against running the wallet dry.
+    /// 0 = no floor.
+    /// </summary>
+    public int MinGilReserve { get; set; } = 5000;
+
+    /// <summary>
+    /// Session counter — total gil spent on Lifestream long-range teleports
+    /// since Start. Reset on Start; reflected in the Status tab.
+    /// Persisted across config save so a crash doesn't lose the running total.
+    /// </summary>
+    public int SessionTeleportCostGil { get; set; } = 0;
+    public int SessionTeleportCount { get; set; } = 0;
 
     /// <summary>
     /// How long to wait after death for a raise before giving up and clicking
@@ -299,10 +322,29 @@ public sealed class Configuration : IPluginConfiguration
     public bool EnableAutoTrading { get; set; } = false;
 
     /// <summary>
-    /// Gem count at which auto-trading is triggered. Default 1350 = 90% of
-    /// the 1500 cap (safe margin so we don't waste FATE rewards).
+    /// Gem count at which auto-trading is triggered. Default 1200 = 80% of
+    /// the 1500 cap (300-gem buffer; a Bonus FATE with The Forlorn rare can
+    /// award up to ~64 gems in one shot, so 1350 left only a 150 buffer that
+    /// could waste rewards. 1200 is safer.)
+    ///
+    /// When <see cref="EnableAdaptiveTradeTrigger"/> is true and a Twist of
+    /// Fate buff is active, the effective trigger is lowered by 100 (1100),
+    /// since the next FATE will yield extra gems.
     /// </summary>
-    public int TradingTriggerGems { get; set; } = 1350;
+    public int TradingTriggerGems { get; set; } = 1200;
+
+    /// <summary>
+    /// Hard cap from the game (Bicolor Gemstones max). Used for both the cap
+    /// reached check and the adaptive trigger math. Configurable in case SE
+    /// raises the cap in a future patch.
+    /// </summary>
+    public int BicolorGemCap { get; set; } = 1500;
+
+    /// <summary>
+    /// When true and a Twist of Fate buff is active, lower the trade trigger
+    /// by 100 to avoid wasting the buff's gem multiplier (cap-out risk).
+    /// </summary>
+    public bool EnableAdaptiveTradeTrigger { get; set; } = true;
 
     /// <summary>
     /// Shopping list — set of Item IDs (Lumina row) the user wants to buy.
@@ -339,4 +381,46 @@ public sealed class Configuration : IPluginConfiguration
         /// entries surveyed before this field existed will read empty.</summary>
         public string ItemName { get; set; } = "";
     }
+
+    // ─────────────────────────────── Integrations / safety ──────────────────
+
+    /// <summary>
+    /// Disable YesAlready's auto-Yes/Talk plugin (if installed) while the bot
+    /// runs, restore on Stop. YesAlready ambient-clicking dialogs that the bot
+    /// also tries to handle causes silent race conditions (skipped trade
+    /// confirms, double-Returns, etc.). Per AutoDuty/Questionable convention.
+    /// </summary>
+    public bool DisableYesAlreadyWhileRunning { get; set; } = true;
+
+    /// <summary>
+    /// Auto-stop the bot if Dalamud reports an active Duty (IDutyState.IsDutyStarted).
+    /// Bot was never meant to run inside instanced content — if the user gets
+    /// pulled into one, the safest action is to halt rather than AFK in dungeon.
+    /// </summary>
+    public bool AutoStopInDuty { get; set; } = true;
+
+    /// <summary>
+    /// While Paused (session-cap macro break), perform occasional human-like
+    /// idle actions: /afk on entry, periodic /stretch or /sit emote at random
+    /// intervals. Greatly reduces "statue standing for 30 min" bot signature.
+    /// </summary>
+    public bool EnablePausedIdleBehavior { get; set; } = true;
+
+    // ─────────────────────────────── Twist of Fate chain ────────────────────
+
+    /// <summary>
+    /// Status ID for "Twist of Fate" — applied after killing Forlorn Maiden /
+    /// The Forlorn rare in a FATE. Boosts gem rewards on the *next* FATE in
+    /// the same zone, so the bot should aggressively chain (skip humanize
+    /// delays, never rotate zone) until the buff expires.
+    /// </summary>
+    public uint TwistOfFateStatusId { get; set; } = 1288;
+
+    /// <summary>
+    /// When true and a Twist of Fate buff is active, the bot:
+    ///   • picks the closest valid FATE in the SAME zone (ignores HasBonus pref)
+    ///   • skips the Think/Hesitate humanize delays
+    ///   • refuses to rotate to another zone until the buff expires
+    /// </summary>
+    public bool EnableTwistOfFateChain { get; set; } = true;
 }
