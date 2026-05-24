@@ -1273,6 +1273,11 @@ public sealed class FateController : IDisposable
                 Transition(FateBotState.Selecting);
                 return;
             }
+            // Belt-and-suspenders: close any leftover shop/vendor addon
+            // before firing. An open modal counts as "player occupied" to
+            // the game and Lifestream rejects every teleport attempt until
+            // we close it.
+            TryCloseShopExchangeCurrency();
             var ok = _lifestream.Teleport(_pendingTeleportAetheryte, 0);
             LogAction($"Lifestream.Teleport(aetheryte={_pendingTeleportAetheryte}) → {ok}");
             if (ok)
@@ -2835,13 +2840,21 @@ public sealed class FateController : IDisposable
         return have >= cap;
     }
 
-    private void FinishTrading()
+    private unsafe void FinishTrading()
     {
         _tradingVendor = null;
         _tradingItemId = 0;
         _tradingTeleportFired = false;
         _tradingAethernetFired = false;
         _tradingSurveyMode = false;
+
+        // Defensive close — if the ShopExchangeCurrency addon is still
+        // visible (single FireCallbackInt sometimes doesn't latch on the
+        // first try), close it. An open shop addon counts as "player
+        // occupied" and blocks Lifestream.Teleport for the next rotation —
+        // tester hit a 15-minute teleport-loop because the shop window
+        // stayed open after a survey completed.
+        TryCloseShopExchangeCurrency();
         // Survey-triggered runs return to Stopped — they were never part of a
         // farming session. Auto-trade-triggered runs return to Selecting to
         // resume the FATE rotation.
@@ -2861,6 +2874,28 @@ public sealed class FateController : IDisposable
         {
             Transition(FateBotState.Selecting);
         }
+    }
+
+    /// <summary>
+    /// Force-close the ShopExchangeCurrency addon if it's still up. The
+    /// per-transaction FireCallbackInt(-1) we send during Buy/Survey
+    /// occasionally drops on the floor — leaving the shop visible
+    /// counts as "player occupied" to the game, which makes Lifestream
+    /// reject every Teleport for the next rotation.
+    /// </summary>
+    private unsafe void TryCloseShopExchangeCurrency()
+    {
+        try
+        {
+            var ptr = _gameGui.GetAddonByName("ShopExchangeCurrency");
+            var addon = (AtkUnitBase*)ptr.Address;
+            if (addon != null && addon->IsVisible)
+            {
+                addon->FireCallbackInt(-1);
+                LogAction("trading: shop addon still visible — force-close");
+            }
+        }
+        catch (Exception ex) { _log.Warning(ex, "TryCloseShopExchangeCurrency failed"); }
     }
 
     /// <summary>
