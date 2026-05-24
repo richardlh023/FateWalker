@@ -3984,6 +3984,19 @@ public sealed class FateController : IDisposable
         if (msg.StartsWith("BossMod.Deactivate", StringComparison.Ordinal)) return;
         // FATE-done lines vary by name but always represent forward progress.
         if (msg.StartsWith("FATE done:", StringComparison.Ordinal)) return;
+        // Pull commit drops naturally every time a mob dies and falls out
+        // of the object table — during an AoE-heavy fight against 4-5 mobs
+        // we get one of these every few seconds. Not a stuck signal.
+        if (msg.StartsWith("pull commit dropped", StringComparison.Ordinal)) return;
+        // collect-FATE per-tick chatter — fires every loop while we wait
+        // for FateUtils to walk us to the next pickup.
+        if (msg.StartsWith("collect-FATE:", StringComparison.Ordinal)) return;
+        // Forlorn / Forlorn Maiden re-target logs fire repeatedly as long
+        // as the elite is alive but in committed-target check loop.
+        if (msg.Contains("[forlorn priority]", StringComparison.Ordinal)) return;
+        // BossMod retarget mode flips between Never / NoTarget every time
+        // we enter/leave a collect-pickup window — chatter, not stuck.
+        if (msg.StartsWith("BossMod AutoTarget Retarget →", StringComparison.Ordinal)) return;
 
         var fp = State + "|" + LoopFingerprintStripper.Replace(msg, "*");
         _logFingerprints.AddLast((DateTime.UtcNow, fp));
