@@ -2800,7 +2800,11 @@ public sealed class FateController : IDisposable
             }
             else if (DateTime.UtcNow >= _nextIdleEmoteAt)
             {
-                var pool = new[] { "/stretch", "/sit", "/lookout", "/yawn" };
+                // One-shot animations ONLY — no stateful pose-changing emotes.
+                // /sit (was here) put the character in a sitting pose; when
+                // the pause ended the bot would try to mount/move while still
+                // sitting and silently stall. Toggle-emotes are unsafe.
+                var pool = new[] { "/stretch", "/lookout", "/yawn", "/doze", "/lookout2" };
                 var pick = pool[_rng.Next(pool.Length)];
                 _action.ExecuteChatCommand(pick);
                 LogAction($"Paused: idle emote {pick}");
@@ -2810,7 +2814,16 @@ public sealed class FateController : IDisposable
 
         if (DateTime.UtcNow < _pauseEndsAt) return;
 
-        // Timer elapsed — resume.
+        // Timer elapsed — resume. Defensive stand-up: if any prior emote
+        // (or the user themselves before Pause started) left the character
+        // in a sitting / doze / sleep pose, a Jump force-stands them.
+        // Mount / move actions silently fail while seated, which previously
+        // caused a hard stall ("stuck in sitting pose" tester report).
+        if (_config.EnablePausedIdleBehavior && !_config.DryRun)
+        {
+            _action.Jump();
+            LogAction("Paused: resume — Jump to force stand-up");
+        }
         _pausedAfkSent = false;
         if (_pauseResetSessionTimer)
         {
