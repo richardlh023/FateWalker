@@ -118,6 +118,8 @@ public sealed class FateController : IDisposable
     private string _pendingPauseReason = "";
     private bool _pendingPauseResetTimer;
     private DateTime _lastPreparePauseFleeAt = DateTime.MinValue;
+    private string _lastFleeThreatName = "";
+    private DateTime _lastFleeLogAt = DateTime.MinValue;
     private DateTime _lastPreparePauseTpAt = DateTime.MinValue;
     private bool _preparePauseTeleportFired;
 
@@ -1493,9 +1495,50 @@ public sealed class FateController : IDisposable
         }
         if (_condition[ConditionFlag.InCombat])
         {
-            LogAction("in combat, can't mount — engaging instead");
-            Transition(FateBotState.Engaging);
-            return;
+            // Distance gate: only transition to Engaging if we're actually
+            // at the picked FATE. Otherwise the combat is ambient (leftover
+            // mob from previous FATE chase) and Engaging would stall — it
+            // would look for FateId=X mobs within 40y and find none, then
+            // the watchdog / logic-loop would cascade into a 15-min pause
+            // (see v1.2.3.0 regression: bot picked FATE 878y away, ambient
+            // mob blocked mount, Engaging stranded, paused).
+            //
+            // Fix: activate combat AI to clear the ambient mob right here.
+            // Once combat ends, the Mounted flag check above will let us
+            // mount and continue. _targetFateId stays set — same FATE pick
+            // resumes after combat.
+            var player = _objectTable.LocalPlayer;
+            bool atFate = player != null && IsInFateRange(player.Position);
+            if (atFate)
+            {
+                LogAction("in combat at FATE — engaging");
+                Transition(FateBotState.Engaging);
+                return;
+            }
+            // Far from FATE → ambient combat. Activate combat AI in-place
+            // to kill aggressor(s) without abandoning the FATE pick.
+            if (!_bossmodActivated && !_config.DryRun)
+            {
+                var preset = BossModPresetData.ForBackend(_config.CombatBackend);
+                LogAction($"Mounting: in combat far from FATE ({(player == null ? "?" : Vector2.Distance(new Vector2(player.Position.X, player.Position.Z), new Vector2(_targetFatePos.X, _targetFatePos.Z)).ToString("F0"))}y) — clearing aggro in-place");
+                _bossmod.Activate(preset);
+                _bossmodActivated = true;
+                if (_config.CombatBackend == Configuration.CombatBackendKind.RSR)
+                {
+                    _rsr.Activate();
+                    _rsrActivated = true;
+                }
+            }
+            return; // stay in Mounting; mount when combat clears
+        }
+        // Out of combat — if BossMod was activated above for ambient clear,
+        // deactivate before mounting (combat AI prevents mount cast).
+        if (_bossmodActivated && !_config.DryRun)
+        {
+            _bossmod.Deactivate();
+            _bossmodActivated = false;
+            if (_rsrActivated) { _rsr.Deactivate(); _rsrActivated = false; }
+            LogAction("Mounting: ambient combat cleared — mounting now");
         }
         // Blocked by a SelectYesno dialog (e.g. FATE-start prompt auto-popped
         // by player proximity to the MotivationNpc). Mount actions silently
@@ -2736,7 +2779,16 @@ public sealed class FateController : IDisposable
                     player.Position.Y,
                     player.Position.Z + (awayZ / len) * 80f);
                 try { _navmesh.PathfindAndMoveCloseTo(dst, fly: false, range: 1f); } catch {}
-                LogAction($"PreparingPause: flee — {threat.Name.TextValue} aggroed @ {threatDist:F1}y, running 80y");
+                // Log only when the threat changes or every 15s — keeps the
+                // ring buffer readable when the same mob clings for 30+ seconds.
+                var threatName = threat.Name.TextValue;
+                if (threatName != _lastFleeThreatName
+                    || DateTime.UtcNow - _lastFleeLogAt > TimeSpan.FromSeconds(15))
+                {
+                    _lastFleeThreatName = threatName;
+                    _lastFleeLogAt = DateTime.UtcNow;
+                    LogAction($"PreparingPause: flee — {threatName} aggroed @ {threatDist:F1}y, running 80y");
+                }
             }
             return;
         }
@@ -4153,6 +4205,7 @@ public sealed class FateController : IDisposable
             _genericLastPos = player.Position;
             _genericLastMoveAt = DateTime.UtcNow;
             _stuckTierLogged = 0;   // moved → reset tier so next stuck logs from 5s again
+            _lastStuckJumpAt = DateTime.MinValue; // ditto — fresh stuck event can jump immediately
             return;
         }
 
@@ -4228,10 +4281,18 @@ public sealed class FateController : IDisposable
                 return;
             }
         }
-        // 5s tier: jump
+        // 5s tier: jump — throttled to once per 2s. Without this, the watchdog
+        // fires Jump every framework tick (~60Hz) for 10 straight seconds,
+        // which both spams the game with key presses AND fills the log ring
+        // with "stuck-jump" lines that falsely trip CheckLogicLoop's
+        // fingerprint detector → session-disabling the FATE the bot was
+        // happily killing 5s earlier.
+        if (DateTime.UtcNow - _lastStuckJumpAt < TimeSpan.FromSeconds(2)) return;
+        _lastStuckJumpAt = DateTime.UtcNow;
         try { _action.Jump(); LogAction("watchdog: stuck-jump"); }
         catch (Exception ex) { _log.Warning(ex, "stuck-jump failed"); }
     }
+    private DateTime _lastStuckJumpAt = DateTime.MinValue;
 
     /// <summary>
     /// Attempt dismount; on persistent failure (game refuses because we're
@@ -4347,6 +4408,12 @@ public sealed class FateController : IDisposable
         // of the object table — during an AoE-heavy fight against 4-5 mobs
         // we get one of these every few seconds. Not a stuck signal.
         if (msg.StartsWith("pull commit dropped", StringComparison.Ordinal)) return;
+        // stuck-jump is the watchdog's response to OTHER stuck signals — if
+        // those higher-level signals warrant escalation, they'll trip the
+        // detector themselves. Counting our own recovery action as a "loop"
+        // double-counts the same event and prematurely session-disables the
+        // FATE (see v1.2.2.0 regression where bot abandoned active FATEs).
+        if (msg.StartsWith("watchdog: stuck-jump", StringComparison.Ordinal)) return;
         // collect-FATE per-tick chatter — fires every loop while we wait
         // for FateUtils to walk us to the next pickup.
         if (msg.StartsWith("collect-FATE:", StringComparison.Ordinal)) return;
