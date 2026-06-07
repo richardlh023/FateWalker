@@ -2377,6 +2377,14 @@ public sealed class FateController : IDisposable
     // effect before we issue another one.
     private DateTime _lastRepathfindAt = DateTime.MinValue;
 
+    // Collect-FATE pickup is delegated to BossMod's FateUtils ("Pickup" goal)
+    // via Hints.InteractWithTarget — we just clear targets so the AI can drive.
+    // When FateUtils stalls or doesn't engage (e.g. items spawn outside its
+    // line-of-sight) the bot stands still indefinitely. This timer drives a
+    // periodic active nudge — pathfind to a random point inside the FATE
+    // radius — so BossMod has fresh stimulus and the bot doesn't camp one spot.
+    private DateTime _lastCollectNudgeAt = DateTime.MinValue;
+
     // Anti-detection: timer that fires a forced random zone rotation even when
     // current zone still has FATEs. DateTime.MaxValue = disabled / not yet
     // rolled. Rolled fresh on Start() and after each fire.
@@ -2683,6 +2691,32 @@ public sealed class FateController : IDisposable
             {
                 LogAction($"collect-FATE: clearing stale target '{_targetManager.Target.Name.TextValue}' so pickup can run");
                 _targetManager.Target = null;
+            }
+
+            // Stuck-nudge: if FateUtils hasn't moved us in 20s+, fire a fresh
+            // pathfind to a random point inside the FATE radius. Throttled to
+            // once per ~25s so we don't dogpile vnavmesh.
+            var stillSec = (DateTime.UtcNow - _genericLastMoveAt).TotalSeconds;
+            var sinceNudge = (DateTime.UtcNow - _lastCollectNudgeAt).TotalSeconds;
+            if (stillSec > 20 && sinceNudge > 25 && _navmesh.IsAvailable && _targetFatePos != Vector3.Zero)
+            {
+                _lastCollectNudgeAt = DateTime.UtcNow;
+                // Pull radius from the live IFate when available; fall back to
+                // a conservative 18y if the FATE isn't in the table this tick.
+                var fateRow = _fateTable.FirstOrDefault(f => f.FateId == _targetFateId);
+                float radius = fateRow != null ? fateRow.Radius * 0.6f : 18f;
+                if (radius < 6f) radius = 6f;
+                var angle = (float)(_rng.NextDouble() * Math.Tau);
+                var r = radius * (0.4f + (float)_rng.NextDouble() * 0.6f);
+                var nudgePos = new Vector3(
+                    _targetFatePos.X + r * MathF.Cos(angle),
+                    _targetFatePos.Y,
+                    _targetFatePos.Z + r * MathF.Sin(angle));
+                var snap = _navmesh.NearestPointReachable(nudgePos, halfExtentXZ: 6f, halfExtentY: 4f);
+                if (snap.HasValue) nudgePos = snap.Value;
+                LogAction($"collect-FATE: stuck {stillSec:F0}s, nudging to ({nudgePos.X:F0},{nudgePos.Y:F0},{nudgePos.Z:F0}) to wake FateUtils");
+                try { _navmesh.Stop(); } catch { }
+                try { _navmesh.PathfindAndMoveCloseTo(nudgePos, fly: true, range: 2f); } catch { }
             }
             return;
         }
