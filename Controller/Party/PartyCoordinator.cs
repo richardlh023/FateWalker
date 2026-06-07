@@ -64,7 +64,9 @@ public sealed class PartyCoordinator : IDisposable
     public string StatusLine => _role switch
     {
         EffectiveRole.Off      => "Party: Off",
-        EffectiveRole.Host     => $"Party: Host · party {PartyCount} · last beat {(DateTime.UtcNow - _lastHostHeartbeatSent).TotalSeconds:F1}s ago",
+        // Host doesn't receive its own broadcasts, so PartyCount is always 0 on
+        // the Host side — read straight off the live party list instead.
+        EffectiveRole.Host     => $"Party: Host · party {CurrentPartyCids.Count} · last beat {(DateTime.UtcNow - _lastHostHeartbeatSent).TotalSeconds:F1}s ago",
         EffectiveRole.Follower => $"Party: Follower · host cid={_currentHostCid} · fate {AssignedFateId} slot {MySlotIdx}",
         _ => "Party: ?",
     };
