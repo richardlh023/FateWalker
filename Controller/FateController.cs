@@ -1799,7 +1799,14 @@ public sealed class FateController : IDisposable
         var npc = _objectTable.SearchByEntityId(_targetMotivationNpcId);
         if (npc == null)
         {
-            LogAction($"MotivationNpc {_targetMotivationNpcId} not in object table — abort");
+            // Give the NPC a few seconds to stream into the object table before
+            // bailing — Dalamud's table only contains entities within ~250y of
+            // the player, so a fresh dismount on a FATE we just flew to can hit
+            // this branch for a tick or two while the world loads in. Bailing
+            // straight back to Selecting (re-pick + re-mount + re-fly) is the
+            // 11-loop dismount/mount thrash the user reported on FATE 1896.
+            if ((DateTime.UtcNow - _stateEnteredAt).TotalSeconds < 6) return;
+            LogAction($"MotivationNpc {_targetMotivationNpcId} not in object table after 6s — abort");
             Transition(FateBotState.Selecting);
             return;
         }
