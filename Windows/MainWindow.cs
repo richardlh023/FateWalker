@@ -821,14 +821,14 @@ public sealed class MainWindow : Window, IDisposable
                            "Host's FATE pick is sent to all clients, who spread around the FATE centre on a deterministic ring + jitter.");
 
         var dpsFollow = cfg.PartyDpsFollowTank;
-        if (ImGui.Checkbox("DPS follow tank's target", ref dpsFollow))
+        if (ImGui.Checkbox("DPS assist tank (focus mobs aggro'd on tank)", ref dpsFollow))
         {
             cfg.PartyDpsFollowTank = dpsFollow;
             _plugin.SaveConfig();
         }
-        ImGui.TextDisabled("When this client is NOT a tank (PLD/WAR/DRK/GNB) and the party has a tank with a live target, " +
-                           "the DPS/healer attacks the SAME mob the tank is fighting — keeps the party focused on one " +
-                           "kill at a time instead of spreading damage. No effect on solo or all-DPS parties.");
+        ImGui.TextDisabled("When this client is NOT a tank (PLD/WAR/DRK/GNB), attack the nearest FATE mob that's already " +
+                           "engaged on the tank. Skips mobs the tank is merely walking toward — so the DPS doesn't steal " +
+                           "the pull. No effect on solo or all-DPS parties.");
 
         ImGui.Separator();
         ImGui.Text("Death recovery");

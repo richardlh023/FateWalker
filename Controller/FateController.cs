@@ -2788,13 +2788,13 @@ public sealed class FateController : IDisposable
             && _party.Role != Controller.Party.PartyCoordinator.EffectiveRole.Off
             && !IsCurrentJobTank())
         {
-            tankFocus = FindPartyTankCurrentTarget();
+            tankFocus = FindMobAggroedOnTank();
         }
 
         if (tankFocus != null)
         {
             pick = tankFocus;
-            mode = "follow tank";
+            mode = "assist tank (aggro'd on tank)";
             _pullCommitId = pick.GameObjectId;
             _pullCommitSetAt = DateTime.UtcNow;
         }
@@ -4583,13 +4583,17 @@ public sealed class FateController : IDisposable
         return p != null && IsTankJob(p.ClassJob.RowId);
     }
 
-    /// <summary>Walk the live party list, find the first tank, and return whatever
-    /// BattleNpc the tank is currently targeting (if it's loaded in this client's
-    /// ObjectTable and not dead). Returns null in solo, no-tank, tank-with-no-target,
-    /// or tank-target-not-in-range scenarios. Cheap — runs once per Engaging tick.</summary>
-    private IBattleNpc? FindPartyTankCurrentTarget()
+    /// <summary>Find the nearest FATE mob that is currently AGGRO'D ON the party
+    /// tank — i.e. a mob whose TargetObjectId == tank.GameObjectId. Returning
+    /// the tank's hard target (the old behaviour) caused the DPS to steal the
+    /// tank's pull while the tank was still walking toward an un-engaged mob.
+    /// Now the DPS waits until the mob has actually engaged the tank, then
+    /// dog-piles on it. Stays scoped to the active FATE so we don't drag the
+    /// DPS off-target onto ambient combat in someone else's pull.</summary>
+    private unsafe IBattleNpc? FindMobAggroedOnTank()
     {
         if (_partyList.Length <= 1) return null;
+        ulong tankObjId = 0;
         for (int i = 0; i < _partyList.Length; i++)
         {
             var pm = _partyList[i];
@@ -4597,18 +4601,27 @@ public sealed class FateController : IDisposable
             if (!IsTankJob(pm.ClassJob.RowId)) continue;
             var tankGo = pm.GameObject;
             if (tankGo == null) continue;
-            var tid = tankGo.TargetObjectId;
-            if (tid == 0 || tid == 0xE0000000) return null;
-            foreach (var obj in _objectTable)
-            {
-                if (obj.GameObjectId != tid) continue;
-                if (obj is not IBattleNpc bn) return null;
-                if (bn.IsDead) return null;
-                return bn;
-            }
-            return null;   // tank has a target id but it isn't loaded for us
+            tankObjId = tankGo.GameObjectId;
+            break;
         }
-        return null;
+        if (tankObjId == 0) return null;
+
+        var me = _objectTable.LocalPlayer;
+        var myPos = me?.Position ?? Vector3.Zero;
+        IBattleNpc? best = null;
+        float bestDist = float.MaxValue;
+        foreach (var obj in _objectTable)
+        {
+            if (obj is not IBattleNpc bn) continue;
+            if (bn.IsDead) continue;
+            if (bn.TargetObjectId != tankObjId) continue;
+            var go = (CSGameObject*)(void*)bn.Address;
+            if (go == null) continue;
+            if (go->FateId == 0 || go->FateId != _targetFateId) continue;
+            var d = Vector3.Distance(bn.Position, myPos);
+            if (d < bestDist) { best = bn; bestDist = d; }
+        }
+        return best;
     }
 
     /// <summary>Identity stamp folded into the session log filename so two clients
