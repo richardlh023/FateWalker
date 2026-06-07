@@ -2362,6 +2362,15 @@ public sealed class FateController : IDisposable
     // current FATE. With it, the flee can re-arm only after a real cooldown.
     private DateTime _lastInCombatFleeAt = DateTime.MinValue;
 
+    // Same cooldown idea, but for the 15s "cancel path + re-pathfind" recovery.
+    // Without it, that LogAction + Pathfind pair fires every framework tick
+    // (~60/sec) for as long as the stuck condition persists. Two clients hit
+    // this together when the party formation point landed slightly off-mesh and
+    // both bots burned dozens of fingerprints in seconds → logic-loop trip →
+    // FATE wrongly session-disabled. 20s lets a re-pathfind actually take
+    // effect before we issue another one.
+    private DateTime _lastRepathfindAt = DateTime.MinValue;
+
     // Anti-detection: timer that fires a forced random zone rotation even when
     // current zone still has FATEs. DateTime.MaxValue = disabled / not yet
     // rolled. Rolled fresh on Start() and after each fire.
@@ -4210,6 +4219,16 @@ public sealed class FateController : IDisposable
             fate.Position, fate.Radius, fate.FateId,
             n, _party.MySlotIdx,
             _config.PartyFormationRadius, _config.PartyFormationJitter);
+        // Snap to walkable mesh — the geometric ring point might be in water /
+        // on a rock / through a wall, and the re-pathfind watchdog will fire
+        // every tick if vnavmesh can't path to it. NearestPointReachable returns
+        // null when nothing is in range; fall back to the FATE centre then.
+        if (_navmesh.IsAvailable)
+        {
+            var snapped = _navmesh.NearestPointReachable(stand, halfExtentXZ: 6f, halfExtentY: 4f);
+            if (snapped.HasValue) stand = snapped.Value;
+            else stand = fate.Position;
+        }
         return stand - fate.Position;
     }
 
@@ -4293,6 +4312,7 @@ public sealed class FateController : IDisposable
             _stuckTierLogged = 0;   // moved → reset tier so next stuck logs from 5s again
             _lastStuckJumpAt = DateTime.MinValue; // ditto — fresh stuck event can jump immediately
             _lastInCombatFleeAt = DateTime.MinValue; // ditto — fresh stuck event can flee immediately
+            _lastRepathfindAt   = DateTime.MinValue; // ditto — fresh stuck event can re-pathfind immediately
             return;
         }
 
@@ -4366,6 +4386,10 @@ public sealed class FateController : IDisposable
                         ?? (_targetFatePos != Vector3.Zero ? _targetFatePos : (Vector3?)null);
             if (dst.HasValue)
             {
+                // Cooldown so this can't re-fire every tick while stillSec stays
+                // ≥15. 20s ≈ one realistic re-pathfind + travel attempt.
+                if ((DateTime.UtcNow - _lastRepathfindAt).TotalSeconds < 20) return;
+                _lastRepathfindAt = DateTime.UtcNow;
                 LogAction($"watchdog: stuck {stillSec:F0}s — cancel path + re-pathfind to ({dst.Value.X:F0},{dst.Value.Y:F0},{dst.Value.Z:F0})");
                 try { _navmesh.Stop(); } catch {}
                 try { _navmesh.PathfindAndMoveCloseTo(dst.Value, fly: true, range: 3f); } catch {}
@@ -4593,9 +4617,18 @@ public sealed class FateController : IDisposable
         // of every legitimate hard FATE in the zone. Skip the disable in that
         // case and let Selecting re-pick the same FATE on the next cycle, by
         // which time HP is restored and aggro is shed.
-        var trippedByCombatStuck = stuck.Key.Contains("in combat", StringComparison.Ordinal)
-                                || stuck.Key.Contains("panic", StringComparison.Ordinal);
-        if (_targetFateId != 0 && !trippedByCombatStuck)
+        // Patterns that indicate transient geometry / combat / panic issues, NOT a
+        // broken FATE. Blacklisting on these would lock the bot out of every
+        // legitimate-but-slightly-off-mesh FATE (especially with party formation
+        // where an offset point can land slightly off-walkable terrain).
+        var k = stuck.Key;
+        bool transient =
+               k.Contains("in combat",      StringComparison.Ordinal)
+            || k.Contains("panic",          StringComparison.Ordinal)
+            || k.Contains("cancel path",    StringComparison.Ordinal)   // 15s re-pathfind
+            || k.Contains("re-pathfind",    StringComparison.Ordinal)
+            || k.Contains("flee before",    StringComparison.Ordinal);  // 30s flee-before-teleport
+        if (_targetFateId != 0 && !transient)
         {
             _sessionDisabledFateIds.Add(_targetFateId);
             LogAction($"logic-loop: session-disabling FATE {_targetFateId} '{_targetFateName}' so a different pick happens");
@@ -4603,7 +4636,7 @@ public sealed class FateController : IDisposable
         else if (_targetFateId != 0)
         {
             LogAction($"logic-loop: NOT disabling FATE {_targetFateId} '{_targetFateName}' " +
-                      "(combat-stuck/panic pattern — fight was just slow, FATE itself is fine)");
+                      "(transient pattern — combat/panic/repathfind, FATE itself is fine)");
         }
         _targetFateId = 0;
         _targetFateName = "";
