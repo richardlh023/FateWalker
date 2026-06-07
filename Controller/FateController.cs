@@ -1914,6 +1914,38 @@ public sealed class FateController : IDisposable
             }
         }
 
+        // Boss-FATE escape protection: a pull commit bypasses the per-mob FATE
+        // radius gate (line ~2562), which means once we've committed to a mob
+        // that wanders out, we'll chase it. In a boss FATE the boss follows
+        // the tank — both end up slightly outside the radius, FATE level-sync
+        // drops, damage stops registering, and the bot stands still trying to
+        // hit something it can't affect. Fire earlier (1.05×) than the
+        // stranded check (2×) so it kicks before we get pinned, and only
+        // while a commit is actually active (no false-positive on legit
+        // edge-of-radius patrols by a non-committed mob).
+        if (_pullCommitId != 0
+            && playerForStranded != null
+            && _targetFateRadius > 0
+            && _targetFatePos != Vector3.Zero)
+        {
+            var distOut = Vector2.Distance(
+                new Vector2(playerForStranded.Position.X, playerForStranded.Position.Z),
+                new Vector2(_targetFatePos.X, _targetFatePos.Z));
+            if (distOut > _targetFateRadius * 1.05f)
+            {
+                LogAction($"outside FATE radius ({distOut:F0}/{_targetFateRadius:F0}y) with active pull commit — dropping commit, returning to centre");
+                _pullCommitId = 0;
+                _pullCommitSetAt = DateTime.MinValue;
+                _targetManager.Target = null;
+                if (_navmesh.IsAvailable)
+                {
+                    try { _navmesh.Stop(); } catch { }
+                    try { _navmesh.PathfindAndMoveCloseTo(_targetFatePos, fly: true, range: _targetFateRadius * 0.4f); } catch { }
+                }
+                return;
+            }
+        }
+
         // Panic-escape: HP critically low AND Second Wind on cooldown → bail.
         if (_config.EnablePanicEscape && !_config.DryRun && CheckPanic(fate))
             return;
