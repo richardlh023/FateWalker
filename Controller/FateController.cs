@@ -2879,6 +2879,27 @@ public sealed class FateController : IDisposable
             ushort pickFateId = pickGo != null ? pickGo->FateId : (ushort)0;
             uint pickNameId = pick.NameId;
             LogAction($"FATE-target [{mode}] → {pick.Name.TextValue} (NameId={pickNameId}, FateId={pickFateId}, active={_targetFateId})");
+
+            // Kick a fresh navmesh path TOWARD the new mob right now. Without
+            // this, the KickIfStuckInEngaging stranded-check waits for 8s of
+            // out-of-combat dwell before pathing, which is exactly the gap
+            // between one mob's death and the next pull — and during that 8s
+            // the bot just stands still firing 5s stuck-jumps (the "moves a
+            // tiny bit then jumps when a mob dies" report). Only fires when
+            // we're actually far from the new pick and not airborne / on a
+            // mount (those branches have their own movement loops). Stays
+            // friendly with BossMod — same destination so they don't fight.
+            var distToPick = Vector3.Distance(pick.Position, player.Position);
+            if (distToPick > 5f
+                && !_condition[ConditionFlag.Mounted]
+                && !_condition[ConditionFlag.InFlight]
+                && _navmesh.IsAvailable)
+            {
+                var snapped = _navmesh.NearestPointReachable(pick.Position, 6f, 6f);
+                var dest = snapped ?? pick.Position;
+                try { _navmesh.PathfindAndMoveCloseTo(dest, fly: false, range: 3f); } catch { }
+                _lastEngagingKickAt = DateTime.UtcNow;
+            }
         }
     }
 
