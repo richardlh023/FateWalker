@@ -1947,6 +1947,10 @@ public sealed class FateController : IDisposable
                 new Vector2(_targetFatePos.X, _targetFatePos.Z));
             if (distOut > _targetFateRadius * 1.05f)
             {
+                // Cooldown so this doesn't refire every tick — restarting the
+                // pathfind each frame prevents vnavmesh from making progress.
+                if ((DateTime.UtcNow - _lastOutsideFateRecoveryAt).TotalSeconds < 15) return;
+                _lastOutsideFateRecoveryAt = DateTime.UtcNow;
                 LogAction($"outside FATE radius ({distOut:F0}/{_targetFateRadius:F0}y) with active pull commit — dropping commit, returning to centre");
                 _pullCommitId = 0;
                 _pullCommitSetAt = DateTime.MinValue;
@@ -2430,6 +2434,15 @@ public sealed class FateController : IDisposable
     // periodic active nudge — pathfind to a random point inside the FATE
     // radius — so BossMod has fresh stimulus and the bot doesn't camp one spot.
     private DateTime _lastCollectNudgeAt = DateTime.MinValue;
+
+    // Cooldown on the v1.4.2 boss-FATE-escape action. Without it the
+    // "outside FATE radius … dropping commit, returning to centre" recovery
+    // fires every framework tick once the player is 1.05× past the radius;
+    // each fire calls _navmesh.PathfindAndMoveCloseTo which RESTARTS the
+    // pathfind, so the bot never actually moves while the log fills with
+    // identical fingerprints that trip the logic-loop watchdog and wrongly
+    // session-disable the FATE.
+    private DateTime _lastOutsideFateRecoveryAt = DateTime.MinValue;
 
     // Anti-detection: timer that fires a forced random zone rotation even when
     // current zone still has FATEs. DateTime.MaxValue = disabled / not yet
@@ -4419,6 +4432,7 @@ public sealed class FateController : IDisposable
             _lastStuckJumpAt = DateTime.MinValue; // ditto — fresh stuck event can jump immediately
             _lastInCombatFleeAt = DateTime.MinValue; // ditto — fresh stuck event can flee immediately
             _lastRepathfindAt   = DateTime.MinValue; // ditto — fresh stuck event can re-pathfind immediately
+            _lastOutsideFateRecoveryAt = DateTime.MinValue; // ditto — fresh outside-FATE event can recover immediately
             return;
         }
 
@@ -4786,11 +4800,14 @@ public sealed class FateController : IDisposable
         // where an offset point can land slightly off-walkable terrain).
         var k = stuck.Key;
         bool transient =
-               k.Contains("in combat",      StringComparison.Ordinal)
-            || k.Contains("panic",          StringComparison.Ordinal)
-            || k.Contains("cancel path",    StringComparison.Ordinal)   // 15s re-pathfind
-            || k.Contains("re-pathfind",    StringComparison.Ordinal)
-            || k.Contains("flee before",    StringComparison.Ordinal);  // 30s flee-before-teleport
+               k.Contains("in combat",          StringComparison.Ordinal)
+            || k.Contains("panic",              StringComparison.Ordinal)
+            || k.Contains("cancel path",        StringComparison.Ordinal)   // 15s re-pathfind
+            || k.Contains("re-pathfind",        StringComparison.Ordinal)
+            || k.Contains("flee before",        StringComparison.Ordinal)   // 30s flee-before-teleport
+            || k.Contains("outside FATE radius",StringComparison.Ordinal)   // v1.4.2 boss-escape recovery
+            || k.Contains("dropping commit",    StringComparison.Ordinal)
+            || k.Contains("returning to centre",StringComparison.Ordinal);
         if (_targetFateId != 0 && !transient)
         {
             _sessionDisabledFateIds.Add(_targetFateId);
