@@ -923,6 +923,12 @@ public sealed class FateController : IDisposable
                                  && IsVendorWalkClose(vendor, out _);
                     _tradingTeleportFired = walkOnly;
                     _lastTradingActionAt = DateTime.MinValue;
+                    // Remember the FATE zone we're leaving so the post-trade rotate
+                    // can come back here instead of jumping to the lowest-id zone
+                    // in the working set (which desyncs party members still farming
+                    // the original map).
+                    if (TerritoryMap.Lookup(_clientState.TerritoryType) != null)
+                        _lastDepartedFromTerritory = _clientState.TerritoryType;
                     var hop = walkOnly ? " (vendor close by, walking)" : "";
                     LogAction($"trading: gems {gems} ≥ {_config.TradingTriggerGems} → routing to {vendor.Name} ({vendor.Settlement}) for item {itemId}{hop}");
                     if (!_config.DryRun)
@@ -1429,9 +1435,17 @@ public sealed class FateController : IDisposable
         uint nextTerritory;
         if (urgentRotate)
         {
-            // Just pick the first available — no round-robin notion when we're
-            // urgently leaving (outside working set or current zone maxed).
-            nextTerritory = candidates[0];
+            // Prefer returning to the zone we just departed (the FATE zone we
+            // were farming before going to the city to trade, or before getting
+            // stranded). Without this, sorted-ascending candidates[0] always
+            // sends us to the lowest-id zone in the working set — which is the
+            // wrong zone any time the user's chosen "return" zone isn't the
+            // numerically-smallest one, and desyncs party members still on the
+            // original map.
+            if (_lastDepartedFromTerritory != 0 && candidates.Contains(_lastDepartedFromTerritory))
+                nextTerritory = _lastDepartedFromTerritory;
+            else
+                nextTerritory = candidates[0];
         }
         else
         {
