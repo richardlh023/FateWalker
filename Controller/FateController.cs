@@ -1936,16 +1936,16 @@ public sealed class FateController : IDisposable
         }
 
         // Boss-FATE escape protection: a pull commit bypasses the per-mob FATE
-        // radius gate (line ~2562), which means once we've committed to a mob
-        // that wanders out, we'll chase it. In a boss FATE the boss follows
-        // the tank — both end up slightly outside the radius, FATE level-sync
-        // drops, damage stops registering, and the bot stands still trying to
-        // hit something it can't affect. Fire earlier (1.05×) than the
-        // stranded check (2×) so it kicks before we get pinned, and only
-        // while a commit is actually active (no false-positive on legit
-        // edge-of-radius patrols by a non-committed mob).
-        if (_pullCommitId != 0
-            && playerForStranded != null
+        // radius gate, which means once we've committed to a mob that wanders
+        // out, we'll chase it. In a boss FATE the boss follows the tank — both
+        // end up slightly outside the radius, FATE level-sync drops, damage
+        // stops registering, and the bot stands still trying to hit something
+        // it can't affect. Fire earlier (1.05×) than the stranded check (2×)
+        // so it kicks before we get pinned. Runs whether a commit is active
+        // or not — the user reported the no-commit case too: after a previous
+        // recovery drops the commit, the bot is still outside the ring with a
+        // mob hitting it, no path home, standing still.
+        if (playerForStranded != null
             && _targetFateRadius > 0
             && _targetFatePos != Vector3.Zero)
         {
@@ -1958,7 +1958,8 @@ public sealed class FateController : IDisposable
                 // pathfind each frame prevents vnavmesh from making progress.
                 if ((DateTime.UtcNow - _lastOutsideFateRecoveryAt).TotalSeconds < 15) return;
                 _lastOutsideFateRecoveryAt = DateTime.UtcNow;
-                LogAction($"outside FATE radius ({distOut:F0}/{_targetFateRadius:F0}y) with active pull commit — dropping commit, returning to centre");
+                var hadCommit = _pullCommitId != 0 ? "with active pull commit" : "no commit";
+                LogAction($"outside FATE radius ({distOut:F0}/{_targetFateRadius:F0}y) {hadCommit} — dropping commit, returning to centre");
                 _pullCommitId = 0;
                 _pullCommitSetAt = DateTime.MinValue;
                 _targetManager.Target = null;
@@ -2625,17 +2626,31 @@ public sealed class FateController : IDisposable
             // pull target out past 1.5 × radius, the filter drops it, the
             // commit dies, and the next tick picks a different mob —
             // exactly the "target keeps swapping mid-pull" tester report.
+            var dist = Vector3.Distance(npc.Position, player.Position);
+            bool isAggroOnUs = npc.TargetObjectId == playerId;
+
+            // Per-mob radius gate. The cap depends on the mob's relationship
+            // to us so we don't drag the bot — especially a tank — outside the
+            // FATE ring chasing things that are merely *near* the ring.
+            //   • committed pull/kill target → always allowed (chase wanderers)
+            //   • aggro'd on us              → up to 1.5× radius (it's hitting
+            //     us; we'll defend ourselves wherever it sits)
+            //   • not aggro / not committed  → strictly within 1.0× radius.
+            //     This was 1.5× before, which caused the bug where a tank
+            //     pull-nearest'd a mob spawning just outside the ring, ran
+            //     out, and then couldn't damage anything because FATE level-
+            //     sync had dropped. Inside-only for fresh pull picks.
             if (_targetFateRadius > 0 && npc.GameObjectId != _pullCommitId)
             {
                 var fateDist2D = Vector2.Distance(
                     new Vector2(npc.Position.X, npc.Position.Z),
                     new Vector2(_targetFatePos.X, _targetFatePos.Z));
-                if (fateDist2D > _targetFateRadius * 1.5f) continue;
+                float cap = isAggroOnUs ? _targetFateRadius * 1.5f : _targetFateRadius * 1.0f;
+                if (fateDist2D > cap) continue;
             }
 
-            var dist = Vector3.Distance(npc.Position, player.Position);
-            if (npc.TargetObjectId == playerId) aggro.Add((npc, dist));
-            else                                 unaggro.Add((npc, dist));
+            if (isAggroOnUs) aggro.Add((npc, dist));
+            else             unaggro.Add((npc, dist));
         }
 
         // Phase decision:
