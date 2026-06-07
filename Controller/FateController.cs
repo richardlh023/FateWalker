@@ -4552,6 +4552,27 @@ public sealed class FateController : IDisposable
         // fingerprint detector → session-disabling the FATE the bot was
         // happily killing 5s earlier.
         if (DateTime.UtcNow - _lastStuckJumpAt < TimeSpan.FromSeconds(2)) return;
+
+        // Suppress when the bot is legitimately stationary mid-fight — a ranged
+        // DPS / healer attacking a mob at attack range LOOKS like a 5s
+        // no-movement event but is the correct combat behaviour. Criteria:
+        //   • in active combat
+        //   • a valid target is selected within ~25 y (attack range, +buffer)
+        //   • the target's elevation is within 5 y (same terrain layer, not on
+        //     a ledge that the bot actually needs to jump-pop onto)
+        // If all three hold, the bot isn't stuck on geometry; it's killing
+        // something. Don't fire the jump (saves visual jank + log noise).
+        if (_condition[ConditionFlag.InCombat])
+        {
+            var tgt = _targetManager.Target;
+            if (tgt != null)
+            {
+                var tDist = Vector3.Distance(player.Position, tgt.Position);
+                var tDy   = Math.Abs(tgt.Position.Y - player.Position.Y);
+                if (tDist <= 25f && tDy <= 5f) return;
+            }
+        }
+
         _lastStuckJumpAt = DateTime.UtcNow;
         try { _action.Jump(); LogAction("watchdog: stuck-jump"); }
         catch (Exception ex) { _log.Warning(ex, "stuck-jump failed"); }
