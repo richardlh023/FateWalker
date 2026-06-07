@@ -2746,7 +2746,27 @@ public sealed class FateController : IDisposable
             committedMob = null;
         }
 
-        if (commitStillValid)
+        // Party Mode: if I'm a DPS / healer and there's a tank in the party
+        // with a live target, focus-fire that mob — overrides any local commit
+        // so the party converges on one target at a time instead of spreading
+        // damage. Tank's own target picking is unchanged. Skipped if the tank's
+        // target is dead, not loaded in our object table, or is not a battle NPC.
+        IBattleNpc? tankFocus = null;
+        if (_config.PartyDpsFollowTank
+            && _party.Role != Controller.Party.PartyCoordinator.EffectiveRole.Off
+            && !IsCurrentJobTank())
+        {
+            tankFocus = FindPartyTankCurrentTarget();
+        }
+
+        if (tankFocus != null)
+        {
+            pick = tankFocus;
+            mode = "follow tank";
+            _pullCommitId = pick.GameObjectId;
+            _pullCommitSetAt = DateTime.UtcNow;
+        }
+        else if (commitStillValid)
         {
             pick = committedMob;
             mode = commitIsAggro ? "kill (commit)" : "pull (commit)";
@@ -4513,6 +4533,50 @@ public sealed class FateController : IDisposable
             _dismountFailCount = 0;
         }
         return true;
+    }
+
+    /// <summary>FFXIV ClassJob row ids for the six tank classes/jobs. Used by
+    /// the party "DPS follow tank target" feature to figure out which member of
+    /// the party is THE tank (or whether this client should follow one).
+    ///   1  Gladiator    19 Paladin
+    ///   3  Marauder     21 Warrior
+    ///                   32 Dark Knight
+    ///                   37 Gunbreaker</summary>
+    private static bool IsTankJob(uint classJobId) =>
+        classJobId is 1u or 3u or 19u or 21u or 32u or 37u;
+
+    private bool IsCurrentJobTank()
+    {
+        var p = _objectTable.LocalPlayer;
+        return p != null && IsTankJob(p.ClassJob.RowId);
+    }
+
+    /// <summary>Walk the live party list, find the first tank, and return whatever
+    /// BattleNpc the tank is currently targeting (if it's loaded in this client's
+    /// ObjectTable and not dead). Returns null in solo, no-tank, tank-with-no-target,
+    /// or tank-target-not-in-range scenarios. Cheap — runs once per Engaging tick.</summary>
+    private IBattleNpc? FindPartyTankCurrentTarget()
+    {
+        if (_partyList.Length <= 1) return null;
+        for (int i = 0; i < _partyList.Length; i++)
+        {
+            var pm = _partyList[i];
+            if (pm == null) continue;
+            if (!IsTankJob(pm.ClassJob.RowId)) continue;
+            var tankGo = pm.GameObject;
+            if (tankGo == null) continue;
+            var tid = tankGo.TargetObjectId;
+            if (tid == 0 || tid == 0xE0000000) return null;
+            foreach (var obj in _objectTable)
+            {
+                if (obj.GameObjectId != tid) continue;
+                if (obj is not IBattleNpc bn) return null;
+                if (bn.IsDead) return null;
+                return bn;
+            }
+            return null;   // tank has a target id but it isn't loaded for us
+        }
+        return null;
     }
 
     /// <summary>Identity stamp folded into the session log filename so two clients

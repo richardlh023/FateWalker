@@ -820,6 +820,16 @@ public sealed class MainWindow : Window, IDisposable
                            "Auto mode = lowest party content-id self-promotes to Host; everyone else follows. " +
                            "Host's FATE pick is sent to all clients, who spread around the FATE centre on a deterministic ring + jitter.");
 
+        var dpsFollow = cfg.PartyDpsFollowTank;
+        if (ImGui.Checkbox("DPS follow tank's target", ref dpsFollow))
+        {
+            cfg.PartyDpsFollowTank = dpsFollow;
+            _plugin.SaveConfig();
+        }
+        ImGui.TextDisabled("When this client is NOT a tank (PLD/WAR/DRK/GNB) and the party has a tank with a live target, " +
+                           "the DPS/healer attacks the SAME mob the tank is fighting — keeps the party focused on one " +
+                           "kill at a time instead of spreading damage. No effect on solo or all-DPS parties.");
+
         ImGui.Separator();
         ImGui.Text("Death recovery");
         var grace = cfg.RaiseGraceSeconds;

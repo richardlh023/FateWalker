@@ -256,6 +256,14 @@ public sealed class Configuration : IPluginConfiguration
     /// TTL is ~1s so this needs to be brisker than that × 2.</summary>
     public float PartyHeartbeatSec { get; set; } = 2f;
 
+    /// <summary>When this client is a DPS (or healer) AND there's a tank in the
+    /// party, switch our combat target to whatever the tank is fighting. Keeps
+    /// the party focus-firing one mob at a time instead of every member running
+    /// their own pull/kill priority and spreading damage across the pack. The
+    /// tank's "nearest aggro" pick is unchanged. Default on; off = original
+    /// per-client target selection.</summary>
+    public bool PartyDpsFollowTank { get; set; } = true;
+
     /// <summary>
     /// While engaging, force the player's target to a BattleNpc whose
     /// <c>GameObject.FateId</c> matches the current FATE — overriding RSR/BossMod
