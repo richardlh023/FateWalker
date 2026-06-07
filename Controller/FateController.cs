@@ -40,6 +40,10 @@ public sealed class FateController : IDisposable
     private readonly IGameGui _gameGui;
     private readonly IChatGui _chatGui;
     private readonly SessionFileLogger _fileLogger;
+    private readonly IPartyList _partyList;
+    private readonly Controller.Party.PartyCoordinator _party;
+    /// <summary>Public read-only access for the UI status line.</summary>
+    public Controller.Party.PartyCoordinator Party => _party;
     private Action? _saveConfig;
     private readonly ActionExecutor _action;
     private readonly FateSelector _selector;
@@ -377,7 +381,8 @@ public sealed class FateController : IDisposable
         IDataManager dataManager,
         IKeyState keyState,
         IDutyState dutyState,
-        YesAlreadyIpc yesAlready)
+        YesAlreadyIpc yesAlready,
+        IPartyList partyList)
     {
         _config = config;
         _log = log;
@@ -403,6 +408,8 @@ public sealed class FateController : IDisposable
         _keyState = keyState;
         _dutyState = dutyState;
         _yesAlready = yesAlready;
+        _partyList = partyList;
+        _party = new Controller.Party.PartyCoordinator(_config, _log, LogAction);
 
         _framework.Update += OnFrameworkUpdate;
     }
@@ -600,7 +607,7 @@ public sealed class FateController : IDisposable
         _lastBossModAvail = _bossmod.IsAvailable;
         _lastLifestreamAvail = _lifestream.IsAvailable;
         _lastRsrAvail = _rsr.IsAvailable;
-        _fileLogger.BeginSession();
+        _fileLogger.BeginSession(BuildCharacterTag(), _config.EnableFileLog);
         LogAction(_config.DryRun ? "START (DRY RUN — no actions)" : $"START · gems={_sessionStartGemCount}");
         if (!_config.DryRun)
         {
@@ -674,6 +681,7 @@ public sealed class FateController : IDisposable
     {
         _framework.Update -= OnFrameworkUpdate;
         _chatGui.ChatMessage -= OnChatMessage;
+        try { _party.Dispose(); } catch { }
         if (!_config.DryRun)
         {
             if (_rsrActivated)     _rsr.Deactivate();
@@ -741,8 +749,42 @@ public sealed class FateController : IDisposable
 
     private void OnFrameworkUpdate(IFramework f)
     {
+        try { PumpPartyCoordinator(); } catch (Exception ex) { _log.Error(ex, "PartyCoordinator pump crashed"); }
         try { Tick(); }
         catch (Exception ex) { _log.Error(ex, "FateController tick crashed"); }
+    }
+
+    /// <summary>Refresh PartyCoordinator's view of "who am I, who's in my party"
+    /// from Dalamud's IPartyList + IClientState, then tick it so heartbeats /
+    /// host election / message drain all happen at most once per framework frame.</summary>
+    private unsafe void PumpPartyCoordinator()
+    {
+        var me = _objectTable.LocalPlayer;
+        // Dalamud SDK 15 doesn't surface LocalContentId on IClientState yet — read
+        // it from FFXIVClientStructs PlayerState directly. Same ulong, same source.
+        var ps = FFXIVClientStructs.FFXIV.Client.Game.UI.PlayerState.Instance();
+        ulong myCid = ps != null ? ps->ContentId : 0;
+        _party.MyCid       = myCid;
+        _party.MyTerritory = GetCurrentTerritory();
+        // Solo (party size 0 or 1 with just me) → CurrentPartyCids is empty so
+        // IsLowestCidInParty() short-circuits to true and Host election always
+        // succeeds. Otherwise, snapshot the cross-realm-safe content-ids.
+        if (_partyList.Length <= 1)
+        {
+            _party.CurrentPartyCids = me != null && myCid != 0 ? new[] { myCid } : System.Array.Empty<ulong>();
+        }
+        else
+        {
+            var cids = new System.Collections.Generic.List<ulong>(_partyList.Length);
+            for (int i = 0; i < _partyList.Length; i++)
+            {
+                var pm = _partyList[i];
+                if (pm == null) continue;
+                if (pm.ContentId != 0) cids.Add((ulong)pm.ContentId);
+            }
+            _party.CurrentPartyCids = cids;
+        }
+        _party.Tick();
     }
 
     /// <summary>
@@ -1143,12 +1185,27 @@ public sealed class FateController : IDisposable
         if (!chainSkipHumanize && DateTime.UtcNow - _stateEnteredAt < _humanizeDelay)
             return;
 
+        // Party Mode (Follower): override the local pick with whatever the Host
+        // assigned, if it exists in the active FATE list. Falls through to the
+        // local pick if the assigned FATE has despawned or isn't in this zone.
+        if (_party.Role == Controller.Party.PartyCoordinator.EffectiveRole.Follower
+            && _party.AssignedFateId != 0)
+        {
+            var assigned = _fateTable.FirstOrDefault(ft => ft.FateId == _party.AssignedFateId);
+            if (assigned != null && assigned.State is FateState.Running or FateState.Preparing)
+                chosen = chosen with { Fate = assigned };
+        }
         _targetFateId = chosen.Fate.FateId;
         _targetFateName = chosen.Fate.Name.TextValue;
         _targetFatePos = chosen.Fate.Position;
+        // Party Mode (Host): immediately broadcast this assignment so Followers
+        // converge within one heartbeat rather than waiting the full beat. The
+        // coordinator keeps re-publishing on its own clock for late joiners.
+        if (_party.Role == Controller.Party.PartyCoordinator.EffectiveRole.Host)
+            _party.PublishFateAssign(_targetFateId, GetCurrentTerritory());
         // Humanize: roll a random landing offset within the configured radius.
         // Same offset is used the entire travel so we don't shuffle mid-flight.
-        _targetFateLandingOffset = RollWaypointOffset();
+        _targetFateLandingOffset = ChooseLandingOffset(chosen.Fate);
         _landingRefined = false; // fresh target — let RefineLandingTarget retarget once
         _refinedLandingPos = null;
 
@@ -2297,6 +2354,13 @@ public sealed class FateController : IDisposable
     // Watchdog stuck-event de-dup: increments to next tier (5/15/30s) only
     // once per continuous stuck period. Resets when the player moves >2y.
     private int _stuckTierLogged;   // 0 = none, 1 = 5s logged, 2 = 15s, 3 = 30s
+
+    // Cooldown for the 30s "stuck + in combat — flee before teleport" action.
+    // Without this gate the action fires every framework tick (~60/sec) once
+    // stillSec crosses 30s, racking up dozens of identical-fingerprint log
+    // events that trip the logic-loop watchdog and falsely session-disable the
+    // current FATE. With it, the flee can re-arm only after a real cooldown.
+    private DateTime _lastInCombatFleeAt = DateTime.MinValue;
 
     // Anti-detection: timer that fires a forced random zone rotation even when
     // current zone still has FATEs. DateTime.MaxValue = disabled / not yet
@@ -4127,6 +4191,28 @@ public sealed class FateController : IDisposable
             (float)(_rng.NextDouble() * 2 - 1) * r);
     }
 
+    /// <summary>Final landing offset relative to the FATE centre. In solo mode
+    /// (or when this client has no formation slot) it's the humanize jitter.
+    /// In Party Mode (Host/Follower with a slot) it's the formation stand-point
+    /// so the party spreads around the FATE instead of stacking on the centre.</summary>
+    private Vector3 ChooseLandingOffset(Dalamud.Game.ClientState.Fates.IFate fate)
+    {
+        if (_party.Role == Controller.Party.PartyCoordinator.EffectiveRole.Off || _party.MySlotIdx < 0)
+            return RollWaypointOffset();
+
+        // Use either the Host's broadcast count or the live party size, whichever
+        // is bigger (resilient to a Follower with no recent FATE_ASSIGN yet).
+        var liveCount = _party.CurrentPartyCids.Count;
+        var n = System.Math.Max(_party.PartyCount, liveCount);
+        if (n <= 1) return RollWaypointOffset();
+
+        var stand = Controller.Party.PartyFormation.ComputeStandPoint(
+            fate.Position, fate.Radius, fate.FateId,
+            n, _party.MySlotIdx,
+            _config.PartyFormationRadius, _config.PartyFormationJitter);
+        return stand - fate.Position;
+    }
+
     /// <summary>Pathfind throttle with humanize jitter — 1500 ms ±PathfindJitterMs/2.</summary>
     private TimeSpan PathfindThrottle()
     {
@@ -4206,6 +4292,7 @@ public sealed class FateController : IDisposable
             _genericLastMoveAt = DateTime.UtcNow;
             _stuckTierLogged = 0;   // moved → reset tier so next stuck logs from 5s again
             _lastStuckJumpAt = DateTime.MinValue; // ditto — fresh stuck event can jump immediately
+            _lastInCombatFleeAt = DateTime.MinValue; // ditto — fresh stuck event can flee immediately
             return;
         }
 
@@ -4249,6 +4336,11 @@ public sealed class FateController : IDisposable
             // teleport when we drop out of combat.
             if (_condition[ConditionFlag.InCombat])
             {
+                // Cooldown: gate so this can't re-fire every tick while stillSec
+                // stays past 30. ~30s is roughly one flee+return cycle; if the
+                // bot is still stuck after that the action can run again.
+                if ((DateTime.UtcNow - _lastInCombatFleeAt).TotalSeconds < 30) return;
+                _lastInCombatFleeAt = DateTime.UtcNow;
                 LogAction($"watchdog: stuck {stillSec:F0}s + in combat — flee before teleport");
                 FleeCombatForRepair();
                 return;
@@ -4357,6 +4449,19 @@ public sealed class FateController : IDisposable
             _dismountFailCount = 0;
         }
         return true;
+    }
+
+    /// <summary>Identity stamp folded into the session log filename so two clients
+    /// running side-by-side produce one file per character ("…_RefiaSaronia@Mumi.log").
+    /// Falls back to "anon" if we're called before login.</summary>
+    private string BuildCharacterTag()
+    {
+        var p = _objectTable.LocalPlayer;
+        if (p == null) return "anon";
+        var name = p.Name.TextValue;
+        string world = "";
+        try { world = p.HomeWorld.Value.Name.ExtractText(); } catch { /* lumina shape varies */ }
+        return string.IsNullOrEmpty(world) ? name : $"{name}@{world}";
     }
 
     private void LogAction(string msg)
@@ -4480,10 +4585,25 @@ public sealed class FateController : IDisposable
         // Soft recovery: blacklist current FATE for the session so we don't
         // re-pick it, abort any in-flight pathing/teleport, deactivate combat
         // AI, drop back to Selecting for a clean re-pick.
-        if (_targetFateId != 0)
+        //
+        // BUT: if the trip came from a stuck-in-combat / panic-flee pattern,
+        // the FATE itself isn't broken — a tough fight against a high-HP boss
+        // (esp. with two clients sharing the framerate) just took long enough
+        // for the recovery to fire repeatedly. Blacklisting would lock us out
+        // of every legitimate hard FATE in the zone. Skip the disable in that
+        // case and let Selecting re-pick the same FATE on the next cycle, by
+        // which time HP is restored and aggro is shed.
+        var trippedByCombatStuck = stuck.Key.Contains("in combat", StringComparison.Ordinal)
+                                || stuck.Key.Contains("panic", StringComparison.Ordinal);
+        if (_targetFateId != 0 && !trippedByCombatStuck)
         {
             _sessionDisabledFateIds.Add(_targetFateId);
             LogAction($"logic-loop: session-disabling FATE {_targetFateId} '{_targetFateName}' so a different pick happens");
+        }
+        else if (_targetFateId != 0)
+        {
+            LogAction($"logic-loop: NOT disabling FATE {_targetFateId} '{_targetFateName}' " +
+                      "(combat-stuck/panic pattern — fight was just slow, FATE itself is fine)");
         }
         _targetFateId = 0;
         _targetFateName = "";

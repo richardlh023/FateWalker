@@ -3,9 +3,26 @@ using Dalamud.Configuration;
 
 namespace FateWalker;
 
+/// <summary>
+/// Party-coordination role for multi-client (2+ FFXIV.exe on one machine) runs.
+///   Off       — original solo behaviour. No cross-client messages.
+///   Host      — this client picks the FATE; broadcasts FATE_ASSIGN to followers.
+///   Follower  — this client only acts on FATE_ASSIGN it receives; doesn't pick.
+///   Auto      — start as follower; lowest-ContentID in the party self-promotes
+///               to host. Deterministic — every client computes the same result
+///               without negotiation.
+/// </summary>
+public enum PartyMode
+{
+    Off = 0,
+    Auto = 1,
+    Host = 2,
+    Follower = 3,
+}
+
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 3;
+    public int Version { get; set; } = 4;   // ↑3 → 4: added PartyMode + party formation
 
     public bool LevelSyncAlwaysEnable { get; set; } = true;
 
@@ -200,6 +217,32 @@ public sealed class Configuration : IPluginConfiguration
     /// when min durability drops below <see cref="RepairAtDurabilityPercent"/>.
     /// </summary>
     public bool EnableAutoRepair { get; set; } = true;
+
+    /// <summary>
+    /// Write the per-session log file to <c>{pluginConfigDir}/logs/session_*.log</c>.
+    /// When off, the in-memory UI log tab + Dalamud's plugin log + the anti-loop
+    /// watchdog all keep working (they don't touch disk) — only the file is skipped.
+    /// Default on. Turn off to spare disk I/O on long runs or multi-client setups.
+    /// </summary>
+    public bool EnableFileLog { get; set; } = true;
+
+    // ───────────────────────────── Party Mode (multi-client) ─────────────────
+    /// <summary>Cross-client party coordination. See <see cref="PartyMode"/>.</summary>
+    public PartyMode PartyMode { get; set; } = PartyMode.Off;
+
+    /// <summary>Spread radius (yalms) the formation places members around a FATE's
+    /// centre. ~8y sits inside the FATE ring on most level-80+ FATEs while
+    /// staying off the boss hitbox; lower for small mob FATEs, higher for huge bosses.</summary>
+    public float PartyFormationRadius { get; set; } = 8f;
+
+    /// <summary>±yalm random jitter added to the formation point so members don't
+    /// stand on perfectly geometric ring vertices (visual tell). Re-rolled per FATE.</summary>
+    public float PartyFormationJitter { get; set; } = 2f;
+
+    /// <summary>How often (s) Host re-publishes FATE_ASSIGN as a heartbeat so a
+    /// Follower that lost the initial message converges. TinyIpc's default message
+    /// TTL is ~1s so this needs to be brisker than that × 2.</summary>
+    public float PartyHeartbeatSec { get; set; } = 2f;
 
     /// <summary>
     /// While engaging, force the player's target to a BattleNpc whose

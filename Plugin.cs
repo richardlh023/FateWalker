@@ -44,7 +44,8 @@ public sealed class Plugin : IDalamudPlugin
         IGameGui gameGui,
         IDataManager dataManager,
         IKeyState keyState,
-        IDutyState dutyState)
+        IDutyState dutyState,
+        IPartyList partyList)
     {
         _pluginInterface = pluginInterface;
         _commandManager = commandManager;
@@ -64,7 +65,7 @@ public sealed class Plugin : IDalamudPlugin
         var fileLogger = new SessionFileLogger(pluginInterface);
         _controller = new FateController(
             Config, log, framework, clientState, condition,
-            objectTable, fateTable, targetManager, Navmesh, BossMod, Rsr, Lifestream, TextAdvance, addonLifecycle, gameGui, chat, fileLogger, action, selector, dataManager, keyState, dutyState, YesAlready);
+            objectTable, fateTable, targetManager, Navmesh, BossMod, Rsr, Lifestream, TextAdvance, addonLifecycle, gameGui, chat, fileLogger, action, selector, dataManager, keyState, dutyState, YesAlready, partyList);
         _controller.SetSaveConfigCallback(SaveConfig);
 
         _mainWindow = new MainWindow(this, fateTable, clientState, objectTable);

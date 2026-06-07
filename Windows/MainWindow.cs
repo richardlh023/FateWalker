@@ -764,6 +764,53 @@ public sealed class MainWindow : Window, IDisposable
         ImGui.TextDisabled($"Current min: {_plugin.Controller.LastDurabilityMin}%. Bot teleports to the closest Mender (per MenderMap), interacts, clicks Repair All, and resumes.");
 
         ImGui.Separator();
+        ImGui.Text("Logging");
+        var enableFileLog = cfg.EnableFileLog;
+        if (ImGui.Checkbox("Write session log file", ref enableFileLog))
+        {
+            cfg.EnableFileLog = enableFileLog;
+            _plugin.SaveConfig();
+        }
+        ImGui.TextDisabled("Per-session file at logs/session_<time>_<character>@<world>.log. " +
+                           "Off = skip disk I/O entirely (UI log tab + watchdog still work). Takes effect next START.");
+
+        ImGui.Separator();
+        ImGui.Text("Party Mode (multi-client coordination)");
+        ImGui.TextDisabled(_plugin.Controller.Party.StatusLine);
+        var modeIdx = (int)cfg.PartyMode;
+        string[] modes = { "Off", "Auto (lowest CID = Host)", "Host", "Follower" };
+        ImGui.SetNextItemWidth(220f);
+        if (ImGui.Combo("party role", ref modeIdx, modes, modes.Length))
+        {
+            cfg.PartyMode = (FateWalker.PartyMode)modeIdx;
+            _plugin.SaveConfig();
+        }
+        var pfr = cfg.PartyFormationRadius;
+        ImGui.SetNextItemWidth(160f);
+        if (ImGui.SliderFloat("spread radius (y)", ref pfr, 3f, 15f, "%.1f"))
+        {
+            cfg.PartyFormationRadius = pfr;
+            _plugin.SaveConfig();
+        }
+        var pfj = cfg.PartyFormationJitter;
+        ImGui.SetNextItemWidth(160f);
+        if (ImGui.SliderFloat("position jitter (±y)", ref pfj, 0f, 5f, "%.1f"))
+        {
+            cfg.PartyFormationJitter = pfj;
+            _plugin.SaveConfig();
+        }
+        var hb = cfg.PartyHeartbeatSec;
+        ImGui.SetNextItemWidth(160f);
+        if (ImGui.SliderFloat("heartbeat (s)", ref hb, 1f, 5f, "%.1f"))
+        {
+            cfg.PartyHeartbeatSec = hb;
+            _plugin.SaveConfig();
+        }
+        ImGui.TextDisabled("Cross-process broadcast on channel FateWalker.Party.v1 (TinyIpc memory-mapped file). " +
+                           "Auto mode = lowest party content-id self-promotes to Host; everyone else follows. " +
+                           "Host's FATE pick is sent to all clients, who spread around the FATE centre on a deterministic ring + jitter.");
+
+        ImGui.Separator();
         ImGui.Text("Death recovery");
         var grace = cfg.RaiseGraceSeconds;
         ImGui.SetNextItemWidth(160f);

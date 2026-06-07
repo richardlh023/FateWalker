@@ -27,6 +27,7 @@ public sealed class SessionFileLogger : IDisposable
     private StreamWriter? _writer;
     private string? _currentFile;
     private DateTime _lastFlushAt = DateTime.MinValue;
+    private bool _enabled = true;
 
     public string? CurrentFilePath => _currentFile;
 
@@ -37,15 +38,38 @@ public sealed class SessionFileLogger : IDisposable
         Directory.CreateDirectory(_logDir);
     }
 
-    /// <summary>Open a fresh log file. Closes any previous session.</summary>
-    public void BeginSession()
+    /// <summary>Open a fresh log file. Closes any previous session.
+    /// <paramref name="characterTag"/> (sanitized character_world) is folded
+    /// into the filename so multi-client runs produce one file per character
+    /// instead of colliding on a shared timestamp directory.
+    /// <paramref name="enabled"/>=false skips file creation entirely; the
+    /// in-memory log tab + watchdog still work.</summary>
+    public void BeginSession(string? characterTag = null, bool enabled = true)
     {
         End();
-        var name = $"session_{DateTime.Now:yyyyMMdd_HHmmss}.log";
+        _enabled = enabled;
+        if (!enabled) return;
+        var tagPart = string.IsNullOrWhiteSpace(characterTag) ? "" : $"_{Sanitize(characterTag)}";
+        var name = $"session_{DateTime.Now:yyyyMMdd_HHmmss}{tagPart}.log";
         _currentFile = Path.Combine(_logDir, name);
         _writer = new StreamWriter(_currentFile, append: true) { AutoFlush = false };
-        _writer.WriteLine($"# FateWalker session start — {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+        _writer.WriteLine($"# FateWalker session start — {DateTime.Now:yyyy-MM-dd HH:mm:ss}"
+                          + (string.IsNullOrWhiteSpace(characterTag) ? "" : $" — {characterTag}"));
         _lastFlushAt = DateTime.UtcNow;
+    }
+
+    private static string Sanitize(string s)
+    {
+        var span = s.AsSpan();
+        var buf = new System.Text.StringBuilder(span.Length);
+        foreach (var c in span)
+        {
+            if (char.IsLetterOrDigit(c)) buf.Append(c);
+            else if (c == ' ' || c == '-') buf.Append('-');
+            else if (c == '_' || c == '@') buf.Append(c);
+            // drop everything else (apostrophes, slashes, etc.)
+        }
+        return buf.Length == 0 ? "unknown" : buf.ToString();
     }
 
     public void End()
@@ -68,7 +92,7 @@ public sealed class SessionFileLogger : IDisposable
     /// </summary>
     public void Append(string line)
     {
-        if (_writer == null) return;
+        if (!_enabled || _writer == null) return;
         try
         {
             _writer.WriteLine(line);
