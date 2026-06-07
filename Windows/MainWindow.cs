@@ -297,6 +297,16 @@ public sealed class MainWindow : Window, IDisposable
         }
         ImGui.TextDisabled("Skip FATEs with level below (player + delta). 0 = skip nothing; -5 means ignore FATEs more than 5 levels below your Lv.");
 
+        var above = cfg.LevelAboveAllowed;
+        ImGui.SetNextItemWidth(180f);
+        if (ImGui.SliderInt("max level above", ref above, 0, 30, "+%d"))
+        {
+            cfg.LevelAboveAllowed = above;
+            changed = true;
+        }
+        ImGui.TextDisabled("Allow FATEs up to this many levels ABOVE you. 0 = original behaviour (cap at player Lv). " +
+                           "Useful for mixed-level parties — Follower with assigned FATE bypasses this filter entirely.");
+
         ImGui.Spacing();
         ImGui.Text("Minimum FATE time remaining:");
         var minTime = cfg.FateTimeRemainingMinSec;

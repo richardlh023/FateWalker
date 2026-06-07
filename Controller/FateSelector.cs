@@ -143,7 +143,7 @@ public sealed class FateSelector
         bool isStartable = fate.State == FateState.Preparing && fate.GetMotivationNpc() != 0;
         if (!isRunning && !isStartable)                            return $"state={fate.State}";
 
-        if (fate.Level > playerLevel)                              return $"too high (lv{fate.Level})";
+        if (fate.Level > playerLevel + _config.LevelAboveAllowed)  return $"too high (lv{fate.Level})";
         // Bonus FATEs are rare and bypass MinLevelDelta — even a low-level bonus
         // FATE is worth taking because the 100% gem multiplier compensates.
         if (!fate.HasBonus && fate.Level < playerLevel + _config.MinLevelDelta)

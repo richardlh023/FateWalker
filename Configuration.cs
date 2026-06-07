@@ -82,6 +82,18 @@ public sealed class Configuration : IPluginConfiguration
 
     public int MinLevelDelta { get; set; } = -12;
 
+    /// <summary>
+    /// How many levels ABOVE the player a FATE can be while still passing the
+    /// level filter. Default 0 = original behaviour (only FATEs at-or-below
+    /// player level). Set to e.g. 10 to also accept FATEs up to 10 levels
+    /// higher — useful in a mixed-level party where the Host targets content
+    /// the lower-level Follower can still contribute to (FATE level sync
+    /// boosts you up, but HP scaling means very large gaps are pointless).
+    /// In Party Mode (Follower), an assignment from the Host bypasses this
+    /// filter entirely so the party always converges on the same FATE.
+    /// </summary>
+    public int LevelAboveAllowed { get; set; } = 0;
+
     public int FateTimeRemainingMinSec { get; set; } = 60;
 
     /// <summary>

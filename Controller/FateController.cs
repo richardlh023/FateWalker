@@ -1127,6 +1127,22 @@ public sealed class FateController : IDisposable
             _sessionDisabledFateIds.RemoveWhere(id => !liveIds.Contains(id));
         }
 
+        // 1b. Party Follower override — bypasses ALL filters (level/time/blacklist),
+        // mirroring the Manual-pick rules. The Host has decided; we follow.
+        // Falls through to auto-pick if the assigned FATE isn't in this zone's
+        // table or has already ended (Follower will travel separately).
+        if (chosen == null
+            && _party.Role == Controller.Party.PartyCoordinator.EffectiveRole.Follower
+            && _party.AssignedFateId != 0)
+        {
+            var assigned = _fateTable.FirstOrDefault(f => f.FateId == _party.AssignedFateId);
+            if (assigned != null && assigned.State is FateState.Running or FateState.Preparing)
+            {
+                var dist = Vector3.Distance(assigned.Position, player.Position);
+                chosen = new FateCandidate(assigned, dist, true, null);
+            }
+        }
+
         // 2. Auto-pick via selector if no manual override active.
         if (chosen == null)
         {
@@ -1185,16 +1201,6 @@ public sealed class FateController : IDisposable
         if (!chainSkipHumanize && DateTime.UtcNow - _stateEnteredAt < _humanizeDelay)
             return;
 
-        // Party Mode (Follower): override the local pick with whatever the Host
-        // assigned, if it exists in the active FATE list. Falls through to the
-        // local pick if the assigned FATE has despawned or isn't in this zone.
-        if (_party.Role == Controller.Party.PartyCoordinator.EffectiveRole.Follower
-            && _party.AssignedFateId != 0)
-        {
-            var assigned = _fateTable.FirstOrDefault(ft => ft.FateId == _party.AssignedFateId);
-            if (assigned != null && assigned.State is FateState.Running or FateState.Preparing)
-                chosen = chosen with { Fate = assigned };
-        }
         _targetFateId = chosen.Fate.FateId;
         _targetFateName = chosen.Fate.Name.TextValue;
         _targetFatePos = chosen.Fate.Position;
