@@ -4560,33 +4560,52 @@ public sealed class FateController : IDisposable
                 return;
             }
         }
-        // 5s tier: jump — throttled to once per 2s. Without this, the watchdog
-        // fires Jump every framework tick (~60Hz) for 10 straight seconds,
-        // which both spams the game with key presses AND fills the log ring
-        // with "stuck-jump" lines that falsely trip CheckLogicLoop's
-        // fingerprint detector → session-disabling the FATE the bot was
-        // happily killing 5s earlier.
-        if (DateTime.UtcNow - _lastStuckJumpAt < TimeSpan.FromSeconds(2)) return;
+        // 5s tier: jump — original throttle was once per 2s; we replace it
+        // below with a per-character jittered throttle (2.0–4.5s) so two
+        // clients can't sync on the same tick. Without any throttle the
+        // watchdog fires Jump every framework tick (~60Hz) for 10 straight
+        // seconds, which spams the game AND fills the log with identical
+        // fingerprints that trip CheckLogicLoop.
+
+        // Track combat dwell so the suppression below has a "recently was
+        // fighting" memory. Combat ends a few hundred ms after the killing
+        // blow; the bot can sit in OOC + null-target for 1-3 frames between
+        // one mob and the next, which is exactly when the unsuppressed
+        // stuck-jump fires.
+        if (_condition[ConditionFlag.InCombat]) _lastEngagingCombatAt = DateTime.UtcNow;
 
         // Suppress when the bot is legitimately stationary mid-fight — a ranged
         // DPS / healer attacking a mob at attack range LOOKS like a 5s
         // no-movement event but is the correct combat behaviour. Criteria:
-        //   • in active combat
+        //   • in active combat OR has been within the last 5s (covers the
+        //     mob-just-died / next-mob-not-yet-picked gap; without this,
+        //     two clients in the same party deterministically jump at the
+        //     same second every time, which is a giant bot-tell)
         //   • a valid target is selected within ~25 y (attack range, +buffer)
         //   • the target's elevation is within 5 y (same terrain layer, not on
         //     a ledge that the bot actually needs to jump-pop onto)
-        // If all three hold, the bot isn't stuck on geometry; it's killing
-        // something. Don't fire the jump (saves visual jank + log noise).
-        if (_condition[ConditionFlag.InCombat])
+        // Combat-recent without a target also suppresses — the bot is between
+        // pulls, not stuck.
+        var combatRecent = _condition[ConditionFlag.InCombat]
+                        || (DateTime.UtcNow - _lastEngagingCombatAt).TotalSeconds < 5;
+        if (combatRecent)
         {
             var tgt = _targetManager.Target;
-            if (tgt != null)
-            {
-                var tDist = Vector3.Distance(player.Position, tgt.Position);
-                var tDy   = Math.Abs(tgt.Position.Y - player.Position.Y);
-                if (tDist <= 25f && tDy <= 5f) return;
-            }
+            if (tgt == null) return;        // mid-pull gap, do not jump
+            var tDist = Vector3.Distance(player.Position, tgt.Position);
+            var tDy   = Math.Abs(tgt.Position.Y - player.Position.Y);
+            if (tDist <= 25f && tDy <= 5f) return;
         }
+
+        // Anti-sync jitter: even if two clients somehow both reach this line
+        // on the same tick (both genuinely stuck on geometry, both just out of
+        // combat), stagger them by 0-2.5s derived from MyCid so they don't
+        // press space on the same frame. Detection systems flag synchronised
+        // movement across accounts more aggressively than just "the bot
+        // jumps." Random per-fire would also work but ContentId-seeded is
+        // stable per-character (visual identity).
+        var jitterMs = (int)((_party?.MyCid ?? 0) % 2500UL);
+        if (DateTime.UtcNow - _lastStuckJumpAt < TimeSpan.FromMilliseconds(2000 + jitterMs)) return;
 
         _lastStuckJumpAt = DateTime.UtcNow;
         try { _action.Jump(); LogAction("watchdog: stuck-jump"); }
