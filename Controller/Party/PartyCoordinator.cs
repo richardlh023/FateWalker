@@ -98,6 +98,17 @@ public sealed class PartyCoordinator : IDisposable
         // 1. Process anything inbound first so the rest of this tick acts on it.
         _bus.Drain(HandleEnvelope);
 
+        // 1b. Compute own slot deterministically from the local/authoritative
+        // member list. Without this the Host's MySlotIdx stays at -1 forever
+        // (Host doesn't receive its own broadcasts — HandleEnvelope drops them
+        // via the loopback filter), so both Host and Follower fall into the
+        // -1 branch of ChooseLandingOffset and stack on the FATE centre. With
+        // it, every client knows its own slot whether or not the bus delivers
+        // a message — same sorted-cid algorithm both ends use, no negotiation.
+        var slotSource = AssignedMembers.Count > 0 ? AssignedMembers : CurrentPartyCids;
+        MySlotIdx = PartyFormation.AssignSlot(MyCid, slotSource);
+        if (PartyCount == 0) PartyCount = slotSource.Count;
+
         // 2. If we're Host, publish heartbeat / assignment.
         if (_role == EffectiveRole.Host && DueForHeartbeat())
             PublishHostBeat();
