@@ -2449,16 +2449,21 @@ public sealed class FateController : IDisposable
         // Only nudge when we're effectively next to the target (melee
         // distance). Ranged combat at 20+y already visually distinct.
         var dist = Vector3.Distance(player.Position, target.Position);
-        if (dist > 6f) return;
+        if (dist > 8f) return;
         // Throttle with per-CID jitter so two clients can't both nudge
         // on the same tick — they'd path-fight and dance around the boss.
-        var jitterSec = (int)((_party.MyCid % 4000UL) / 1000UL); // 0-3s
-        if ((DateTime.UtcNow - _lastMeleeSpreadNudgeAt).TotalSeconds < 10 + jitterSec) return;
+        // Aggressive cadence (5-8s) so the spread is maintained across the
+        // length of a typical mob (~10-20s for trash, longer for boss).
+        var jitterSec = (int)((_party.MyCid % 3000UL) / 1000UL); // 0-3s
+        if ((DateTime.UtcNow - _lastMeleeSpreadNudgeAt).TotalSeconds < 5 + jitterSec) return;
         _lastMeleeSpreadNudgeAt = DateTime.UtcNow;
 
+        // Skip if we're already at our slot point — no need to re-issue path.
+        // BossMod re-centres us between nudges so this is usually false at
+        // throttle-expiry, but it's cheap insurance.
         var seed = (_targetFateId * 137u % 360u) * (MathF.PI / 180f);
         var slotAngle = (MathF.Tau / _party.PartyCount) * _party.MySlotIdx + seed;
-        var standR = 3.5f;
+        var standR = 5f;                                 // was 3.5 — further from centre = more visible spread
         var standPoint = new Vector3(
             target.Position.X + standR * MathF.Cos(slotAngle),
             target.Position.Y,
@@ -2467,9 +2472,10 @@ public sealed class FateController : IDisposable
         {
             var snap = _navmesh.NearestPointReachable(standPoint, 4f, 3f);
             if (snap.HasValue) standPoint = snap.Value;
-            // range 1.5 so we land near the slot point but don't keep
-            // micro-correcting when we're already close enough.
-            try { _navmesh.PathfindAndMoveCloseTo(standPoint, fly: false, range: 1.5f); } catch { }
+            var distToSlot = Vector3.Distance(player.Position, standPoint);
+            if (distToSlot < 2f) return;                 // already close enough
+            try { _navmesh.PathfindAndMoveCloseTo(standPoint, fly: false, range: 1f); } catch { }
+            LogAction($"melee-spread: nudging to slot {_party.MySlotIdx} stand-point ({standPoint.X:F0},{standPoint.Y:F0},{standPoint.Z:F0}) [{distToSlot:F1}y from current]");
         }
     }
 
