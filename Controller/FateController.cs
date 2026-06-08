@@ -109,6 +109,8 @@ public sealed class FateController : IDisposable
     private uint _repairAetheryteId;
     private bool _repairTeleportFired;
     private DateTime _lastRepairInteractAt = DateTime.MinValue;
+    private DateTime _lastRepairBusyLogAt = DateTime.MinValue;
+    private DateTime _lastRepairMenderSearchLogAt = DateTime.MinValue;
     // Counts how many times Lifestream.Teleport returned false in Repairing.
     // Combat lockout / S-rank aggro / interrupt all push this up; after the
     // threshold we kick a flee-from-combat sub-routine instead of looping.
@@ -4031,6 +4033,22 @@ public sealed class FateController : IDisposable
         // Step 2: wait for loading screen to finish (territory stabilises).
         if (_objectTable.LocalPlayer == null) return;
         if (_condition[ConditionFlag.BetweenAreas] || _condition[ConditionFlag.BetweenAreas51]) return;
+        // Cross-zone Lifestream teleports (Living Memory → Heritage Found etc.)
+        // chain multiple aethernet hops; IsBusy stays true across them while
+        // BetweenAreas briefly flickers off between loads. Without this gate
+        // the bot dismounts at the first inter-hop pause, then sits silently
+        // for 45s waiting for a Mender NPC that won't load until the chain
+        // finishes — exact user-reported "stopped before reaching FATE" bug.
+        if (_lifestream.IsAvailable && _lifestream.IsBusy)
+        {
+            // Periodic heartbeat so it's not 30s of silence in the log.
+            if (DateTime.UtcNow - _lastRepairBusyLogAt > TimeSpan.FromSeconds(5))
+            {
+                _lastRepairBusyLogAt = DateTime.UtcNow;
+                LogAction("Repair: Lifestream still in transit (multi-hop cross-zone) — waiting");
+            }
+            return;
+        }
 
         // Step 3: dismount if mounted (NPCs can't be interacted with from a mount).
         if (_condition[ConditionFlag.Mounted])
@@ -4125,11 +4143,20 @@ public sealed class FateController : IDisposable
         {
             // Streaming may not have loaded the NPC yet right after teleport.
             // Give it a moment.
-            if (DateTime.UtcNow - _stateEnteredAt > TimeSpan.FromSeconds(45))
+            var waitSec = (DateTime.UtcNow - _stateEnteredAt).TotalSeconds;
+            if (waitSec > 45)
             {
                 LogAction("Repair: no Mender NPC found in zone — abort");
                 _repairAetheryteId = 0;
                 Transition(FateBotState.Selecting);
+                return;
+            }
+            // Periodic progress log so we don't have 45s of silence + a confused
+            // user who can't see what's happening.
+            if (DateTime.UtcNow - _lastRepairMenderSearchLogAt > TimeSpan.FromSeconds(10))
+            {
+                _lastRepairMenderSearchLogAt = DateTime.UtcNow;
+                LogAction($"Repair: Mender NPC not in object table yet — searching ({waitSec:F0}/45s)");
             }
             return;
         }
