@@ -1966,7 +1966,11 @@ public sealed class FateController : IDisposable
                 if (_navmesh.IsAvailable)
                 {
                     try { _navmesh.Stop(); } catch { }
-                    try { _navmesh.PathfindAndMoveCloseTo(_targetFatePos, fly: true, range: _targetFateRadius * 0.4f); } catch { }
+                    // Walk back on the ground — bot is dismounted in Engaging,
+                    // and fly:true with no mount silently fails to move. Path
+                    // is short (we're 1-3y past the ring edge); ground walk
+                    // works whether or not we ever took off.
+                    try { _navmesh.PathfindAndMoveCloseTo(_targetFatePos, fly: false, range: _targetFateRadius * 0.4f); } catch { }
                 }
                 return;
             }
@@ -4946,6 +4950,12 @@ public sealed class FateController : IDisposable
         // collect-FATE per-tick chatter — fires every loop while we wait
         // for FateUtils to walk us to the next pickup.
         if (msg.StartsWith("collect-FATE:", StringComparison.Ordinal)) return;
+        // melee-spread is an intentional anti-detection nudge that fires every
+        // 5-8s by design — without this exclusion it falsely trips the
+        // logic-loop watchdog (Hoshimito session 15:10:19 hit PreparingPause(15m)
+        // after 9× hits in 2 min). The nudge action itself is harmless: it
+        // just paths the bot a few yalms; can't deadlock anything.
+        if (msg.StartsWith("melee-spread:", StringComparison.Ordinal)) return;
         // Forlorn / Forlorn Maiden re-target logs fire repeatedly as long
         // as the elite is alive but in committed-target check loop.
         if (msg.Contains("[forlorn priority]", StringComparison.Ordinal)) return;
