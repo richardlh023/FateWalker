@@ -2194,22 +2194,26 @@ public sealed class FateController : IDisposable
         // Party Mode: each member lands at a different angle around the entity
         // so two clients don't drop onto the same tile. Slot 0 keeps the
         // entity position itself (tank lands at boss). Higher slots orbit on
-        // a per-FATE-seeded ring. The screenshot complaint ("ยืนตำแหน่ง
-        // เดียวกันอีก") came from RefineLandingTarget redirecting BOTH
-        // clients to identical entity coords — formation slot was respected
-        // up to the FATE landing, then this method overwrote it.
+        // a per-FATE-seeded ring. Radius scales with the entity's hitbox so
+        // small trash (~0.5y hitbox) still puts us in melee range, while a
+        // huge boss (~4y hitbox) gets a wider spread.
         if (_party.Role != Controller.Party.PartyCoordinator.EffectiveRole.Off
             && _party.MySlotIdx > 0
             && _party.PartyCount > 1)
         {
+            float hitR = 0.5f;
+            foreach (var obj in _objectTable)
+            {
+                if (obj.Position == landAt.Value) { hitR = MathF.Max(0.5f, obj.HitboxRadius); break; }
+            }
             var seed = (_targetFateId * 137u % 360u) * (MathF.PI / 180f);
             var slotAngle = (MathF.Tau / _party.PartyCount) * _party.MySlotIdx + seed;
-            var offsetR = 3.0f + _party.MySlotIdx * 0.7f;   // 3.7-5.1y for slots 1-3
+            var offsetR = hitR + 1.5f + _party.MySlotIdx * 0.3f;   // 2.0-2.6y from hitbox edge
             landAt = new Vector3(
                 landAt.Value.X + offsetR * MathF.Cos(slotAngle),
                 landAt.Value.Y,
                 landAt.Value.Z + offsetR * MathF.Sin(slotAngle));
-            label += $" [slot {_party.MySlotIdx} +{offsetR:F1}y]";
+            label += $" [slot {_party.MySlotIdx} hitR={hitR:F1} +{offsetR:F1}y]";
         }
 
         // Snap to nearest reachable mesh point — fixes Forlorn-on-cliff and
@@ -2463,7 +2467,14 @@ public sealed class FateController : IDisposable
         // throttle-expiry, but it's cheap insurance.
         var seed = (_targetFateId * 137u % 360u) * (MathF.PI / 180f);
         var slotAngle = (MathF.Tau / _party.PartyCount) * _party.MySlotIdx + seed;
-        var standR = 5f;                                 // was 3.5 — further from centre = more visible spread
+        // Stand-radius scales with the target's hitbox so a small trash mob
+        // (HitboxRadius ~0.5y) doesn't put us 4.5y outside melee range while
+        // a giant boss (HitboxRadius ~4y) doesn't pull us onto the hitbox
+        // edge with no spread. +1.8y past the hitbox = inside melee for any
+        // class (3y reach), visible spread for the smallest mobs, real
+        // spread for big ones (slot 1 ~5.8y from a 4y-hitbox boss centre).
+        var hitR = MathF.Max(0.5f, target.HitboxRadius);
+        var standR = hitR + 1.8f;
         var standPoint = new Vector3(
             target.Position.X + standR * MathF.Cos(slotAngle),
             target.Position.Y,
