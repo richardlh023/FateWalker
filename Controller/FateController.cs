@@ -2209,11 +2209,31 @@ public sealed class FateController : IDisposable
             var seed = (_targetFateId * 137u % 360u) * (MathF.PI / 180f);
             var slotAngle = (MathF.Tau / _party.PartyCount) * _party.MySlotIdx + seed;
             var offsetR = hitR + 1.5f + _party.MySlotIdx * 0.3f;   // 2.0-2.6y from hitbox edge
-            landAt = new Vector3(
+            var slotPos = new Vector3(
                 landAt.Value.X + offsetR * MathF.Cos(slotAngle),
                 landAt.Value.Y,
                 landAt.Value.Z + offsetR * MathF.Sin(slotAngle));
-            label += $" [slot {_party.MySlotIdx} hitR={hitR:F1} +{offsetR:F1}y]";
+            // Clamp inside the FATE ring (0.85× radius) so we don't land
+            // outside and immediately trigger the outside-FATE recovery.
+            if (_targetFateRadius > 0 && _targetFatePos != Vector3.Zero)
+            {
+                var dFateCentre = Vector2.Distance(
+                    new Vector2(slotPos.X, slotPos.Z),
+                    new Vector2(_targetFatePos.X, _targetFatePos.Z));
+                var cap = _targetFateRadius * 0.85f;
+                if (dFateCentre > cap)
+                {
+                    var dx = slotPos.X - _targetFatePos.X;
+                    var dz = slotPos.Z - _targetFatePos.Z;
+                    var scale = cap / dFateCentre;
+                    slotPos = new Vector3(
+                        _targetFatePos.X + dx * scale,
+                        slotPos.Y,
+                        _targetFatePos.Z + dz * scale);
+                }
+            }
+            landAt = slotPos;
+            label += $" [slot {_party.MySlotIdx} hitR={hitR:F1} +{offsetR:F1}y clamped]";
         }
 
         // Snap to nearest reachable mesh point — fixes Forlorn-on-cliff and
@@ -2479,6 +2499,33 @@ public sealed class FateController : IDisposable
             target.Position.X + standR * MathF.Cos(slotAngle),
             target.Position.Y,
             target.Position.Z + standR * MathF.Sin(slotAngle));
+
+        // Clamp stand-point inside the FATE ring — when the target is near
+        // the FATE edge, our slot angle can land us outside the ring. The
+        // v1.4.9 "outside FATE radius" recovery would then drag us back to
+        // centre, we'd nudge out, recovery again, ping-pong with the DPS
+        // standing on the ring's edge unable to attack. If the chosen point
+        // is outside the FATE ring, project it onto the chord between target
+        // and FATE centre (or just clamp to 0.85× FATE radius from centre).
+        if (_targetFateRadius > 0 && _targetFatePos != Vector3.Zero)
+        {
+            var dFateCentre = Vector2.Distance(
+                new Vector2(standPoint.X, standPoint.Z),
+                new Vector2(_targetFatePos.X, _targetFatePos.Z));
+            var cap = _targetFateRadius * 0.85f;
+            if (dFateCentre > cap)
+            {
+                // Pull stand-point back along the centre→stand vector to within
+                // the cap. Keeps the slot's relative direction; just shorter.
+                var dx = standPoint.X - _targetFatePos.X;
+                var dz = standPoint.Z - _targetFatePos.Z;
+                var scale = cap / dFateCentre;
+                standPoint = new Vector3(
+                    _targetFatePos.X + dx * scale,
+                    standPoint.Y,
+                    _targetFatePos.Z + dz * scale);
+            }
+        }
         if (_navmesh.IsAvailable)
         {
             var snap = _navmesh.NearestPointReachable(standPoint, 4f, 3f);
