@@ -2064,6 +2064,7 @@ public sealed class FateController : IDisposable
         // target, are not in combat for a while, and the mob is reachably far,
         // kick vnavmesh to ground-walk us toward it.
         if (!_config.DryRun) KickIfStuckInEngaging();
+        if (!_config.DryRun) MaintainPartyMeleeSpread();
 
         // Force-pull: defence/escort FATEs spawn mobs that aggro the NPC, not
         // the player. RSR/BossMod won't auto-cast on them because the player
@@ -2189,6 +2190,28 @@ public sealed class FateController : IDisposable
         }
 
         if (landAt == null) return;
+
+        // Party Mode: each member lands at a different angle around the entity
+        // so two clients don't drop onto the same tile. Slot 0 keeps the
+        // entity position itself (tank lands at boss). Higher slots orbit on
+        // a per-FATE-seeded ring. The screenshot complaint ("ยืนตำแหน่ง
+        // เดียวกันอีก") came from RefineLandingTarget redirecting BOTH
+        // clients to identical entity coords — formation slot was respected
+        // up to the FATE landing, then this method overwrote it.
+        if (_party.Role != Controller.Party.PartyCoordinator.EffectiveRole.Off
+            && _party.MySlotIdx > 0
+            && _party.PartyCount > 1)
+        {
+            var seed = (_targetFateId * 137u % 360u) * (MathF.PI / 180f);
+            var slotAngle = (MathF.Tau / _party.PartyCount) * _party.MySlotIdx + seed;
+            var offsetR = 3.0f + _party.MySlotIdx * 0.7f;   // 3.7-5.1y for slots 1-3
+            landAt = new Vector3(
+                landAt.Value.X + offsetR * MathF.Cos(slotAngle),
+                landAt.Value.Y,
+                landAt.Value.Z + offsetR * MathF.Sin(slotAngle));
+            label += $" [slot {_party.MySlotIdx} +{offsetR:F1}y]";
+        }
+
         // Snap to nearest reachable mesh point — fixes Forlorn-on-cliff and
         // mob-on-unreachable-island edge cases where vnav would otherwise
         // path-fail. Halts on null → falls back to the raw entity position.
@@ -2405,6 +2428,52 @@ public sealed class FateController : IDisposable
     }
 
     /// <summary>
+    /// Active formation maintenance during combat. Without this, two clients
+    /// attacking the same boss converge on the same tile (BossMod's
+    /// StayCloseToTarget brings everyone to the same melee point) — a giant
+    /// visual tell. Every ~10s + per-CID jitter, push the bot toward its
+    /// slot-angle position around the current target, ~3.5y out from the
+    /// mob centre. BossMod will re-centre between nudges; statistical spread
+    /// is what matters, not constant separation.
+    /// Skipped for slot 0 (tank position) and solo / off-party runs.
+    /// </summary>
+    private void MaintainPartyMeleeSpread()
+    {
+        if (_party.Role == Controller.Party.PartyCoordinator.EffectiveRole.Off) return;
+        if (_party.MySlotIdx <= 0 || _party.PartyCount <= 1) return;
+        if (!_condition[ConditionFlag.InCombat]) return;
+        var player = _objectTable.LocalPlayer;
+        if (player == null) return;
+        var target = _targetManager.Target;
+        if (target == null) return;
+        // Only nudge when we're effectively next to the target (melee
+        // distance). Ranged combat at 20+y already visually distinct.
+        var dist = Vector3.Distance(player.Position, target.Position);
+        if (dist > 6f) return;
+        // Throttle with per-CID jitter so two clients can't both nudge
+        // on the same tick — they'd path-fight and dance around the boss.
+        var jitterSec = (int)((_party.MyCid % 4000UL) / 1000UL); // 0-3s
+        if ((DateTime.UtcNow - _lastMeleeSpreadNudgeAt).TotalSeconds < 10 + jitterSec) return;
+        _lastMeleeSpreadNudgeAt = DateTime.UtcNow;
+
+        var seed = (_targetFateId * 137u % 360u) * (MathF.PI / 180f);
+        var slotAngle = (MathF.Tau / _party.PartyCount) * _party.MySlotIdx + seed;
+        var standR = 3.5f;
+        var standPoint = new Vector3(
+            target.Position.X + standR * MathF.Cos(slotAngle),
+            target.Position.Y,
+            target.Position.Z + standR * MathF.Sin(slotAngle));
+        if (_navmesh.IsAvailable)
+        {
+            var snap = _navmesh.NearestPointReachable(standPoint, 4f, 3f);
+            if (snap.HasValue) standPoint = snap.Value;
+            // range 1.5 so we land near the slot point but don't keep
+            // micro-correcting when we're already close enough.
+            try { _navmesh.PathfindAndMoveCloseTo(standPoint, fly: false, range: 1.5f); } catch { }
+        }
+    }
+
+    /// <summary>
     /// HP-based bail-out. Returns true if we triggered a panic-escape this tick
     /// (caller should skip the rest of TickEngaging — we've already transitioned).
     /// Condition: HP% &lt; threshold AND Second Wind not ready. We deactivate combat
@@ -2451,6 +2520,13 @@ public sealed class FateController : IDisposable
     // identical fingerprints that trip the logic-loop watchdog and wrongly
     // session-disable the FATE.
     private DateTime _lastOutsideFateRecoveryAt = DateTime.MinValue;
+
+    // Active in-combat formation maintenance — periodically nudge the bot
+    // toward its slot-angle position around the current target so two clients
+    // attacking the same boss don't stack on the same tile. Throttled long
+    // enough that we don't fight BossMod's positioning every tick — see
+    // MaintainPartyMeleeSpread for details.
+    private DateTime _lastMeleeSpreadNudgeAt = DateTime.MinValue;
 
     // Anti-detection: timer that fires a forced random zone rotation even when
     // current zone still has FATEs. DateTime.MaxValue = disabled / not yet
