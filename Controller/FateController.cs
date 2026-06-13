@@ -1641,7 +1641,9 @@ public sealed class FateController : IDisposable
 
         if (_config.DryRun)
         {
-            LogAction("[DRY] would UseAction(GA_MountRoulette)");
+            LogAction(_config.PreferredMountId == 0
+                ? "[DRY] would UseAction(GA_MountRoulette)"
+                : $"[DRY] would UseAction(Mount:{_config.PreferredMountId})");
             _lastMountAttemptAt = DateTime.UtcNow;
             // In dry run, fake-advance to Traveling after 1s so logic can continue
             if (DateTime.UtcNow - _stateEnteredAt > TimeSpan.FromSeconds(1))
@@ -1649,9 +1651,11 @@ public sealed class FateController : IDisposable
             return;
         }
 
-        if (_action.UseMountRoulette())
+        if (_action.UseMount(_config.PreferredMountId))
         {
-            LogAction("UseAction(Mount Roulette) called");
+            LogAction(_config.PreferredMountId == 0
+                ? "UseAction(Mount Roulette) called"
+                : $"UseAction(Mount:{_config.PreferredMountId}) called");
             _lastMountAttemptAt = DateTime.UtcNow;
         }
 

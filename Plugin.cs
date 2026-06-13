@@ -68,7 +68,7 @@ public sealed class Plugin : IDalamudPlugin
             objectTable, fateTable, targetManager, Navmesh, BossMod, Rsr, Lifestream, TextAdvance, addonLifecycle, gameGui, chat, fileLogger, action, selector, dataManager, keyState, dutyState, YesAlready, partyList);
         _controller.SetSaveConfigCallback(SaveConfig);
 
-        _mainWindow = new MainWindow(this, fateTable, clientState, objectTable);
+        _mainWindow = new MainWindow(this, fateTable, clientState, objectTable, dataManager);
         _windowSystem.AddWindow(_mainWindow);
 
         _commandManager.AddHandler(CommandName, new CommandInfo(OnCommand)

@@ -22,7 +22,7 @@ public enum PartyMode
 
 public sealed class Configuration : IPluginConfiguration
 {
-    public int Version { get; set; } = 4;   // ↑3 → 4: added PartyMode + party formation
+    public int Version { get; set; } = 5;   // ↑4 → 5: added preferred mount selection
 
     public bool LevelSyncAlwaysEnable { get; set; } = true;
 
@@ -100,6 +100,12 @@ public sealed class Configuration : IPluginConfiguration
     /// When true, the controller logs what it would do but performs no game actions.
     /// </summary>
     public bool DryRun { get; set; } = true;
+
+    /// <summary>
+    /// Mount row ID from the Lumina Mount sheet to summon while traveling.
+    /// 0 keeps the old behavior and uses Mount Roulette.
+    /// </summary>
+    public uint PreferredMountId { get; set; } = 0;
 
     /// <summary>
     /// Name substring patterns (case-insensitive) that auto-reject the FATE.
