@@ -17,6 +17,7 @@ public sealed class MainWindow : Window, IDisposable
     private readonly IFateTable _fateTable;
     private readonly IClientState _clientState;
     private readonly IObjectTable _objectTable;
+    private readonly IDataManager _dataManager;
     private readonly FateSelector _selector;
 
     // Throttled save for the ObservedFates catalog — selector marks dirty,
@@ -27,14 +28,20 @@ public sealed class MainWindow : Window, IDisposable
     // Diagnostic dump of AgentFateProgress raw memory — populated when the
     // user clicks "Refresh / Dump" in the Zones tab.
     private List<string>? _sharedFateDump;
+    // Mount selector cache/search state. Built lazily from Lumina's Mount sheet.
+    private List<MountChoice>? _mountChoices;
+    private string _mountSearch = "";
 
-    public MainWindow(Plugin plugin, IFateTable fateTable, IClientState clientState, IObjectTable objectTable)
+    private sealed record MountChoice(uint Id, string Name, string Label);
+
+    public MainWindow(Plugin plugin, IFateTable fateTable, IClientState clientState, IObjectTable objectTable, IDataManager dataManager)
         : base("FateWalker##Main", ImGuiWindowFlags.None)
     {
         _plugin = plugin;
         _fateTable = fateTable;
         _clientState = clientState;
         _objectTable = objectTable;
+        _dataManager = dataManager;
         _selector = new FateSelector(plugin.Config);
 
         SizeConstraints = new WindowSizeConstraints
@@ -621,9 +628,99 @@ public sealed class MainWindow : Window, IDisposable
 
     // ─────────────────────────────── Safety tab ───────────────────────────
 
+    private List<MountChoice> GetMountChoices()
+    {
+        if (_mountChoices != null) return _mountChoices;
+
+        _mountChoices = [];
+        try
+        {
+            var sheet = _dataManager.GetExcelSheet<Lumina.Excel.Sheets.Mount>();
+            if (sheet == null) return _mountChoices;
+
+            foreach (var row in sheet)
+            {
+                var name = row.Singular.ToString();
+                if (string.IsNullOrWhiteSpace(name)) continue;
+                _mountChoices.Add(new MountChoice(row.RowId, name, $"{name} ({row.RowId})"));
+            }
+            _mountChoices = _mountChoices.OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        catch
+        {
+            // Keep the UI usable even if Lumina's Mount sheet is unavailable during load.
+        }
+
+        return _mountChoices;
+    }
+
+    private void DrawPreferredMountSelector()
+    {
+        var cfg = _plugin.Config;
+        var choices = GetMountChoices();
+        var selected = cfg.PreferredMountId == 0
+            ? null
+            : choices.FirstOrDefault(x => x.Id == cfg.PreferredMountId);
+        var preview = cfg.PreferredMountId == 0
+            ? "Mount Roulette (random)"
+            : selected?.Label ?? $"Unknown mount row {cfg.PreferredMountId}";
+
+        ImGui.SetNextItemWidth(360f);
+        if (ImGui.BeginCombo("preferred mount##preferred_mount", preview))
+        {
+            ImGui.SetNextItemWidth(-1f);
+            ImGui.InputTextWithHint("##mount_search", "search mount name or row id…", ref _mountSearch, 96);
+            ImGui.Separator();
+
+            if (ImGui.Selectable("Mount Roulette (random)##mount_0", cfg.PreferredMountId == 0))
+            {
+                cfg.PreferredMountId = 0;
+                _mountSearch = "";
+                _plugin.SaveConfig();
+            }
+            if (cfg.PreferredMountId == 0) ImGui.SetItemDefaultFocus();
+
+            var filter = _mountSearch.Trim();
+            var shown = 0;
+            foreach (var choice in choices)
+            {
+                if (filter.Length > 0
+                    && !choice.Name.Contains(filter, StringComparison.OrdinalIgnoreCase)
+                    && !choice.Id.ToString().Contains(filter, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var isSelected = cfg.PreferredMountId == choice.Id;
+                if (ImGui.Selectable($"{choice.Label}##mount_{choice.Id}", isSelected))
+                {
+                    cfg.PreferredMountId = choice.Id;
+                    _mountSearch = "";
+                    _plugin.SaveConfig();
+                }
+                if (isSelected) ImGui.SetItemDefaultFocus();
+                shown++;
+            }
+
+            if (shown == 0 && filter.Length > 0)
+                ImGui.TextDisabled("No matching mounts.");
+
+            ImGui.EndCombo();
+        }
+
+        ImGui.TextDisabled(cfg.PreferredMountId == 0
+            ? "Uses the game's Mount Roulette. Pick a mount by name to force that summon instead."
+            : $"Forcing {preview}. Pick Mount Roulette to return to random.");
+        if (choices.Count == 0)
+            ImGui.TextColored(new Vector4(1f, 0.7f, 0.3f, 1f), "Mount list unavailable; Lumina Mount sheet returned no named rows.");
+    }
+
     private void DrawSafetyTab()
     {
         var cfg = _plugin.Config;
+
+        ImGui.Text("Mounting");
+        DrawPreferredMountSelector();
+
+        ImGui.Separator();
 
         // Humanize — random jitter to mask mechanically perfect cadence.
         ImGui.Text("Humanize");

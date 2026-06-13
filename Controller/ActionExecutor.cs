@@ -60,6 +60,21 @@ public sealed unsafe class ActionExecutor
         return am->UseAction(ActionType.GeneralAction, GA_MountRoulette);
     }
 
+    public bool UseMount(uint mountId)
+    {
+        if (mountId == 0) return UseMountRoulette();
+
+        var am = ActionManager.Instance();
+        if (am == null) { _log.Warning("ActionManager null"); return false; }
+        var status = am->GetActionStatus(ActionType.Mount, mountId);
+        if (status != 0)
+        {
+            _log.Debug($"Mount {mountId} not usable, status={status:X}");
+            return false;
+        }
+        return am->UseAction(ActionType.Mount, mountId);
+    }
+
     /// <summary>Fire Sprint (General Action 4). Returns false if on cooldown.</summary>
     public bool UseSprint()
     {
